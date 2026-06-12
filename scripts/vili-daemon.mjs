@@ -12,6 +12,15 @@ const projectRoot = path.resolve(__dirname, "..");
 const ravenBaseUrl = process.env.VILI_PUBLIC_BASE_URL || "http://10.77.0.4:8824";
 const ravenDeckUrl = process.env.VILI_PUBLIC_DECK_URL || "ws://10.77.0.4:8824/eve/deck";
 const providerId = "vili.animation";
+const dockerHuggingFaceEnv = [
+  "export HF_TOKEN=\"$(cat /root/.cache/huggingface/token 2>/dev/null || true)\"",
+  "export HUGGING_FACE_HUB_TOKEN=\"$HF_TOKEN\"",
+].join("; ");
+const dockerHuggingFaceArgs = [
+  "-e HF_TOKEN",
+  "-e HUGGING_FACE_HUB_TOKEN",
+  "-v /root/.cache/huggingface:/root/.cache/huggingface:ro",
+].join(" ");
 
 function parseArgs(argv) {
   const args = {
@@ -213,7 +222,8 @@ async function refreshBackendStatus({ includeKimodoHelp = false } = {}) {
     help = await wsl([
       "set -e",
       "service docker start >/dev/null 2>&1 || true",
-      "docker run --rm --runtime=nvidia --gpus all gamecult/kimodo:latest kimodo_gen --help | sed -n '1,6p'",
+      dockerHuggingFaceEnv,
+      `docker run --rm --runtime=nvidia --gpus all ${dockerHuggingFaceArgs} gamecult/kimodo:latest kimodo_gen --help | sed -n '1,6p'`,
     ].join("; "), { timeout: 60000 });
   }
 
@@ -259,9 +269,11 @@ async function generateMotion(request, response) {
   const command = [
     "set -e",
     "service docker start >/dev/null 2>&1 || true",
+    dockerHuggingFaceEnv,
     `mkdir -p ${linuxOutput}`,
     [
       "docker run --rm --runtime=nvidia --gpus all",
+      dockerHuggingFaceArgs,
       "-e TEXT_ENCODER_DEVICE=cpu",
       `-v /mnt/e/Projects/Vili/.vili/artifacts/${jobId}:/outputs`,
       "gamecult/kimodo:latest",
