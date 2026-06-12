@@ -1,0 +1,16 @@
+{
+  "name": "@gamecult/vili",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Vili is the GameCult Persona animation daemon: speech intent in, embodied motion affordance out.",
+  "scripts": {
+    "start": "node scripts/vili-daemon.mjs",
+    "health": "node scripts/vili-daemon.mjs --health",
+    "smoke": "node scripts/smoke-vili.mjs",
+    "provider": "node scripts/vili-daemon.mjs --print-provider-advertisement"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
