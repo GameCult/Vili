@@ -265,7 +265,13 @@ async function generateMotion(request, response) {
   const artifactDir = path.join(args.stateRoot, "artifacts", jobId);
   await mkdir(artifactDir, { recursive: true });
   const duration = Number(body.durationSeconds || body.duration || 4);
+  const diffusionSteps = Math.max(1, Number(body.diffusionSteps || body.diffusion_steps || 20));
+  const seed = body.seed === undefined ? null : Number(body.seed);
   const linuxOutput = `/mnt/e/Projects/Vili/.vili/artifacts/${jobId}`;
+  const outputStem = "/outputs/motion";
+  const optionalArgs = [];
+  if (Number.isFinite(seed)) optionalArgs.push("--seed", `${seed}`);
+  if (body.bvh === true) optionalArgs.push("--bvh");
   const command = [
     "set -e",
     "service docker start >/dev/null 2>&1 || true",
@@ -278,8 +284,10 @@ async function generateMotion(request, response) {
       `-v /mnt/e/Projects/Vili/.vili/artifacts/${jobId}:/outputs`,
       "gamecult/kimodo:latest",
       "kimodo_gen",
-      "--output_dir /outputs",
+      `--output ${outputStem}`,
       `--duration ${duration}`,
+      `--diffusion_steps ${diffusionSteps}`,
+      optionalArgs.join(" "),
       "\"$VILI_PROMPT\"",
     ].join(" "),
   ].join("; ");
@@ -295,6 +303,8 @@ async function generateMotion(request, response) {
     createdAt: new Date().toISOString(),
     prompt,
     durationSeconds: duration,
+    diffusionSteps,
+    seed,
     artifactDir,
     ok: result.ok,
     stdout: result.stdout,
