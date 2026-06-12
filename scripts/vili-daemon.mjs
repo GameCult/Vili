@@ -267,6 +267,7 @@ async function generateMotion(request, response) {
   const duration = Number(body.durationSeconds || body.duration || 4);
   const diffusionSteps = Math.max(1, Number(body.diffusionSteps || body.diffusion_steps || 20));
   const seed = body.seed === undefined ? null : Number(body.seed);
+  const promptBase64 = Buffer.from(prompt, "utf8").toString("base64");
   const linuxOutput = `/mnt/e/Projects/Vili/.vili/artifacts/${jobId}`;
   const outputStem = "/outputs/motion";
   const optionalArgs = [];
@@ -276,6 +277,7 @@ async function generateMotion(request, response) {
     "set -e",
     "service docker start >/dev/null 2>&1 || true",
     dockerHuggingFaceEnv,
+    `export VILI_PROMPT="$(printf '%s' '${promptBase64}' | base64 -d)"`,
     `mkdir -p ${linuxOutput}`,
     [
       "docker run --rm --runtime=nvidia --gpus all",
@@ -294,7 +296,6 @@ async function generateMotion(request, response) {
 
   const result = await wsl(command, {
     timeout: Number(body.timeoutMs || 1000 * 60 * 30),
-    env: { VILI_PROMPT: prompt },
   });
 
   const job = {
