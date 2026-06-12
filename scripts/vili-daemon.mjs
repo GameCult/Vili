@@ -267,7 +267,15 @@ async function generateMotion(request, response) {
   const duration = Number(body.durationSeconds || body.duration || 4);
   const diffusionSteps = Math.max(1, Number(body.diffusionSteps || body.diffusion_steps || 20));
   const seed = body.seed === undefined ? null : Number(body.seed);
-  const promptBase64 = Buffer.from(prompt, "utf8").toString("base64");
+  const meta = {
+    text: prompt,
+    duration,
+    num_samples: Math.max(1, Number(body.numSamples || body.num_samples || 1)),
+    diffusion_steps: diffusionSteps,
+  };
+  if (Number.isFinite(seed)) meta.seed = seed;
+  if (body.cfg) meta.cfg = body.cfg;
+  await writeFile(path.join(artifactDir, "meta.json"), JSON.stringify(meta, null, 2));
   const linuxOutput = `/mnt/e/Projects/Vili/.vili/artifacts/${jobId}`;
   const outputStem = "/outputs/motion";
   const optionalArgs = [];
@@ -277,7 +285,6 @@ async function generateMotion(request, response) {
     "set -e",
     "service docker start >/dev/null 2>&1 || true",
     dockerHuggingFaceEnv,
-    `export VILI_PROMPT="$(printf '%s' '${promptBase64}' | base64 -d)"`,
     `mkdir -p ${linuxOutput}`,
     [
       "docker run --rm --runtime=nvidia --gpus all",
@@ -287,10 +294,8 @@ async function generateMotion(request, response) {
       "gamecult/kimodo:latest",
       "kimodo_gen",
       `--output ${outputStem}`,
-      `--duration ${duration}`,
-      `--diffusion_steps ${diffusionSteps}`,
+      "--input_folder /outputs",
       optionalArgs.join(" "),
-      "\"$VILI_PROMPT\"",
     ].join(" "),
   ].join("; ");
 
