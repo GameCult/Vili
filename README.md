@@ -44,6 +44,72 @@ Important routes:
 - `GET /smoke`
 - `POST /motion/generate`
 
+## Motion Generation
+
+`POST /motion/generate` exposes Kimodo's generation surface through the
+resident worker. Vili owns job identity, persistence, timeout handling, worker
+lifecycle, and the output stem; Kimodo owns synthesis and model-specific export
+formats.
+
+Minimal request:
+
+```json
+{
+  "prompt": "a person gives a small friendly wave",
+  "duration": 1,
+  "diffusionSteps": 20,
+  "bvh": true
+}
+```
+
+Batch requests can use Kimodo-style metadata:
+
+```json
+{
+  "meta": {
+    "texts": [
+      "a person gives a small friendly wave",
+      "a person takes one careful step"
+    ],
+    "durations": [0.5, 0.5],
+    "num_samples": 1,
+    "diffusion_steps": 20
+  },
+  "numTransitionFrames": 3,
+  "cfgType": "regular",
+  "cfgWeight": [1.5],
+  "seed": 6101,
+  "bvh": true,
+  "bvhStandardTpose": true,
+  "saveExampleDir": true
+}
+```
+
+Supported request fields:
+
+- `prompt` / `utterance` plus `duration` / `durationSeconds`
+- `texts` plus `durations`, or a full `meta` object
+- `inputFolder` / `input_folder` for a container-visible Kimodo input folder
+  with `meta.json` and optional `constraints.json`
+- `model`; changing the requested model restarts the single resident worker
+- `diffusionSteps` / `diffusion_steps`
+- `numSamples` / `num_samples`
+- `numTransitionFrames` / `num_transition_frames`
+- `constraints` as an object/list, or `constraints`, `constraintsPath`, or
+  `constraints_path` as a container-visible path
+- `seed`
+- `cfg`, `cfgType` / `cfg_type`, `cfgWeight` / `cfg_weight`
+- `bvh`, `bvhStandardTpose` / `bvh_standard_tpose`
+- `noPostprocess` / `no_postprocess`
+- `saveExampleDir` / `save_example_dir`
+- `timeoutMs`, `workerTimeoutMs`
+
+Vili intentionally does not accept an arbitrary Kimodo output path. Generated
+artifacts are written under `.vili/artifacts/{jobId}/` and referenced from the
+job record. `Kimodo-SOMA-RP-v1.1` produces NPZ and optional BVH output,
+`Kimodo-SMPLX-RP-v1.1` also exports AMASS NPZ, and `Kimodo-G1-RP-v1.1` also
+exports CSV when that model is resident.
+
 ## Current Runtime State
 
 Raven has a Hugging Face token installed at

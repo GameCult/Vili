@@ -87,6 +87,14 @@ function shQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
+function firstDefined(...values) {
+  return values.find((value) => value !== undefined && value !== null);
+}
+
+function boolValue(value) {
+  return value === true || String(value).toLowerCase() === "true" || String(value) === "1";
+}
+
 async function wslJson(script, options = {}) {
   const result = await wsl(script, options);
   if (!result.ok) return { ...result, body: null };
@@ -267,7 +275,7 @@ async function kimodoWorkerHealth(timeout = 10000) {
   return wslJson(`curl -fsS --max-time ${Math.ceil(timeout / 1000)} ${shQuote(`${kimodoWorkerUrl}/health`)}`, { timeout });
 }
 
-async function startKimodoWorker() {
+async function startKimodoWorker({ model = null } = {}) {
   const script = [
     "set -e",
     "service docker start >/dev/null 2>&1 || true",
@@ -289,16 +297,20 @@ async function startKimodoWorker() {
       "python",
       "/opt/vili/kimodo-resident-worker.py",
       `--port ${kimodoWorkerPort}`,
+      model ? `--model ${shQuote(model)}` : "",
     ].join(" "),
   ].join("; ");
   return wsl(script, { timeout: 30000 });
 }
 
-async function ensureKimodoWorker({ timeoutMs = 1000 * 60 * 8 } = {}) {
+async function ensureKimodoWorker({ timeoutMs = 1000 * 60 * 8, model = null } = {}) {
   const health = await kimodoWorkerHealth(10000);
-  if (health.ok && health.body?.ok) return health;
+  if (health.ok && health.body?.ok) {
+    if (!model || health.body.model === model || health.body.displayModel === model) return health;
+    await wsl(`docker rm -f ${shQuote(kimodoWorkerName)} >/dev/null 2>&1 || true`, { timeout: 30000 });
+  }
 
-  const started = await startKimodoWorker();
+  const started = await startKimodoWorker({ model });
   if (!started.ok) return started;
 
   const deadline = Date.now() + timeoutMs;
@@ -334,44 +346,112 @@ async function generateMotion(request, response) {
   }
 
   const prompt = String(body.prompt || body.utterance || "").trim();
-  if (!prompt) {
-    json(response, 400, { ok: false, error: "Missing prompt or utterance." });
+  const hasPromptInput = Boolean(prompt)
+    || Array.isArray(body.texts)
+    || typeof body.meta === "object"
+    || body.inputFolder
+    || body.input_folder;
+  if (!hasPromptInput) {
+    json(response, 400, { ok: false, error: "Missing prompt, utterance, texts, meta, or inputFolder." });
+    return;
+  }
+  if (Array.isArray(body.texts) && !Array.isArray(body.durations)) {
+    json(response, 400, { ok: false, error: "Batch text requests require a durations array." });
     return;
   }
 
   const jobId = `vili-${Date.now()}`;
   const artifactDir = path.join(args.stateRoot, "artifacts", jobId);
   await mkdir(artifactDir, { recursive: true });
-  const duration = Number(body.durationSeconds || body.duration || 4);
-  const diffusionSteps = Math.max(1, Number(body.diffusionSteps || body.diffusion_steps || 20));
+  const duration = firstDefined(body.durationSeconds, body.duration, 4);
+  const bodyMeta = typeof body.meta === "object" && body.meta ? body.meta : {};
+  const diffusionSteps = Math.max(1, Number(firstDefined(
+    body.diffusionSteps,
+    body.diffusion_steps,
+    bodyMeta.diffusion_steps,
+    20,
+  )));
   const seed = body.seed === undefined ? null : Number(body.seed);
-  const meta = {
-    text: prompt,
-    duration,
-    num_samples: Math.max(1, Number(body.numSamples || body.num_samples || 1)),
-    diffusion_steps: diffusionSteps,
-  };
+  const numSamples = Math.max(1, Number(firstDefined(
+    body.numSamples,
+    body.num_samples,
+    bodyMeta.num_samples,
+    1,
+  )));
+  const meta = Object.keys(bodyMeta).length > 0
+    ? { ...bodyMeta }
+    : Array.isArray(body.texts)
+      ? { texts: body.texts, durations: body.durations }
+      : {
+        text: prompt,
+        duration,
+      };
+  meta.num_samples = Math.max(1, Number(firstDefined(body.numSamples, body.num_samples, meta.num_samples, 1)));
+  meta.diffusion_steps = diffusionSteps;
   if (Number.isFinite(seed)) meta.seed = seed;
   if (body.cfg) meta.cfg = body.cfg;
+  const constraintsPath = (() => {
+    if (typeof body.constraints === "string") return body.constraints;
+    if (body.constraints_path) return body.constraints_path;
+    if (body.constraintsPath) return body.constraintsPath;
+    if (body.constraints !== undefined) return `/outputs/${jobId}/constraints.json`;
+    return undefined;
+  })();
+  if (body.constraints !== undefined && typeof body.constraints !== "string") {
+    await writeFile(path.join(artifactDir, "constraints.json"), JSON.stringify(body.constraints, null, 2));
+  }
+  const requestRecord = {
+    schema: "gamecult.vili.motion_request.v0",
+    prompt: prompt || undefined,
+    texts: Array.isArray(body.texts) ? body.texts : undefined,
+    meta,
+    model: body.model,
+    duration,
+    numSamples,
+    diffusion_steps: diffusionSteps,
+    numTransitionFrames: firstDefined(body.numTransitionFrames, body.num_transition_frames),
+    constraints: constraintsPath,
+    seed: Number.isFinite(seed) ? seed : undefined,
+    cfg: body.cfg,
+    cfgType: firstDefined(body.cfgType, body.cfg_type),
+    cfgWeight: firstDefined(body.cfgWeight, body.cfg_weight),
+    bvh: boolValue(body.bvh),
+    bvhStandardTpose: boolValue(firstDefined(body.bvhStandardTpose, body.bvh_standard_tpose)),
+    noPostprocess: boolValue(firstDefined(body.noPostprocess, body.no_postprocess)),
+    saveExampleDir: boolValue(firstDefined(body.saveExampleDir, body.save_example_dir)),
+    inputFolder: firstDefined(body.inputFolder, body.input_folder),
+  };
   await writeFile(path.join(artifactDir, "meta.json"), JSON.stringify(meta, null, 2));
-  const worker = await ensureKimodoWorker({ timeoutMs: Number(body.workerTimeoutMs || 1000 * 60 * 8) });
+  const worker = await ensureKimodoWorker({
+    timeoutMs: Number(firstDefined(body.workerTimeoutMs, body.worker_timeout_ms, 1000 * 60 * 8)),
+    model: body.model || null,
+  });
   let result = worker;
   if (worker.ok) {
     const workerRequest = {
-      prompt,
+      model: body.model,
+      prompt: prompt || undefined,
+      texts: Array.isArray(body.texts) ? body.texts : undefined,
+      meta,
+      inputFolder: firstDefined(body.inputFolder, body.input_folder),
       duration,
       diffusionSteps,
-      numSamples: meta.num_samples,
+      numSamples,
+      numTransitionFrames: firstDefined(body.numTransitionFrames, body.num_transition_frames),
+      constraints: constraintsPath,
       seed: Number.isFinite(seed) ? seed : undefined,
       cfg: body.cfg,
-      bvh: body.bvh === true,
-      bvhStandardTpose: body.bvhStandardTpose === true || body.bvh_standard_tpose === true,
-      noPostprocess: body.noPostprocess === true || body.no_postprocess === true,
+      cfgType: firstDefined(body.cfgType, body.cfg_type),
+      cfgWeight: firstDefined(body.cfgWeight, body.cfg_weight),
+      bvh: boolValue(body.bvh),
+      bvhStandardTpose: boolValue(firstDefined(body.bvhStandardTpose, body.bvh_standard_tpose)),
+      noPostprocess: boolValue(firstDefined(body.noPostprocess, body.no_postprocess)),
+      saveExampleDir: boolValue(firstDefined(body.saveExampleDir, body.save_example_dir)),
       output: `/outputs/${jobId}/motion`,
     };
     await writeFile(path.join(artifactDir, "request.json"), JSON.stringify(workerRequest, null, 2));
     const curlCommand = [
-      `curl -fsS --max-time ${Math.ceil(Number(body.timeoutMs || 1000 * 60 * 30) / 1000)}`,
+      `curl -sS --max-time ${Math.ceil(Number(body.timeoutMs || 1000 * 60 * 30) / 1000)}`,
       "-H 'content-type: application/json'",
       `--data-binary @${shQuote(`/mnt/e/Projects/Vili/.vili/artifacts/${jobId}/request.json`)}`,
       shQuote(`${kimodoWorkerUrl}/generate`),
@@ -380,13 +460,16 @@ async function generateMotion(request, response) {
       "set -e",
       curlCommand,
     ].join("; "), { timeout: Number(body.timeoutMs || 1000 * 60 * 30) });
+    if (result.body?.ok === false) result = { ...result, ok: false };
   }
 
   const job = {
     schema: "gamecult.vili.motion_job.v0",
     jobId,
     createdAt: new Date().toISOString(),
-    prompt,
+    prompt: prompt || null,
+    model: body.model || result.body?.model || null,
+    request: requestRecord,
     durationSeconds: duration,
     diffusionSteps,
     seed,

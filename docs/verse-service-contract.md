@@ -32,18 +32,71 @@ animation job schema stabilizes.
 
 ## Command Boundary
 
-`POST /motion/generate` accepts an explicit animation request:
+`POST /motion/generate` accepts an explicit animation request and forwards the
+supported Kimodo generation controls to the resident worker. Vili owns job
+identity, request persistence, worker lifecycle, timeout handling, and the
+artifact stem. Kimodo owns synthesis and model-specific export.
 
 ```json
 {
   "prompt": "a person gives a small friendly wave",
-  "duration": 2,
+  "duration": 1,
   "diffusionSteps": 20,
   "seed": 123,
-  "output": "wave-test",
   "bvh": true
 }
 ```
+
+Kimodo metadata can be sent directly when callers need multi-segment or
+multi-sample generation:
+
+```json
+{
+  "meta": {
+    "texts": [
+      "a person gives a small friendly wave",
+      "a person takes one careful step"
+    ],
+    "durations": [0.5, 0.5],
+    "num_samples": 1,
+    "diffusion_steps": 20
+  },
+  "model": "Kimodo-SOMA-RP-v1.1",
+  "numTransitionFrames": 3,
+  "cfgType": "regular",
+  "cfgWeight": [1.5],
+  "seed": 6101,
+  "bvh": true,
+  "bvhStandardTpose": true,
+  "saveExampleDir": true
+}
+```
+
+Request fields accepted by Vili:
+
+- `prompt` / `utterance` plus `duration` / `durationSeconds`
+- `texts` plus `durations`, or a full `meta` object
+- `inputFolder` / `input_folder` for a container-visible Kimodo input folder
+  containing `meta.json` and optional `constraints.json`
+- `model`; the daemon keeps one resident model loaded, so a model change
+  restarts `vili-kimodo-worker`
+- `diffusionSteps` / `diffusion_steps`
+- `numSamples` / `num_samples`
+- `numTransitionFrames` / `num_transition_frames`
+- `constraints` as an object/list, or `constraints`, `constraintsPath`, or
+  `constraints_path` as a container-visible path
+- `seed`
+- `cfg`, `cfgType` / `cfg_type`, `cfgWeight` / `cfg_weight`
+- `bvh`, `bvhStandardTpose` / `bvh_standard_tpose`
+- `noPostprocess` / `no_postprocess`
+- `saveExampleDir` / `save_example_dir`
+- `timeoutMs`, `workerTimeoutMs`
+
+Vili does not accept arbitrary `output` paths from callers. Every generation
+writes beneath `.vili/artifacts/{jobId}/`, with the worker receiving
+`/outputs/{jobId}/motion`. The job record is the authority for artifact refs.
+Model-specific exports are preserved: SOMA writes NPZ and optional BVH, SMPLX
+also writes AMASS NPZ, and G1 also writes CSV.
 
 The daemon may reject or defer requests when:
 
@@ -53,7 +106,9 @@ The daemon may reject or defer requests when:
   access.
 - The resident Kimodo worker cannot start or does not become healthy before the
   request timeout.
-- The request omits a concrete prompt.
+- The request omits concrete prompt, metadata, batch text, or input-folder
+  intent.
+- Batch `texts` are provided without matching `durations`.
 
 ## Credential State
 

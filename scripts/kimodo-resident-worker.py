@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import shutil
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -13,6 +14,7 @@ import torch
 from kimodo import DEFAULT_MODEL, load_model
 from kimodo.constraints import load_constraints_lst
 from kimodo.exports.motion_io import save_kimodo_npz
+from kimodo.meta import parse_prompts_from_meta
 from kimodo.model.registry import get_model_info
 from kimodo.scripts.generate import (
     _output_dir_and_path,
@@ -20,7 +22,7 @@ from kimodo.scripts.generate import (
     get_texts_and_num_frames_from_prompt,
     resolve_cfg_kwargs,
 )
-from kimodo.tools import seed_everything
+from kimodo.tools import save_json, seed_everything
 
 
 def parse_args():
@@ -86,6 +88,35 @@ def save_outputs(output, output_base, export_bvh, bvh_standard_tpose):
             save_kimodo_npz(npz_path, single)
             files.append(npz_path)
 
+    if resolved_model == "kimodo-smplx-rp":
+        from kimodo.exports.smplx import AMASSConverter
+
+        converter = AMASSConverter(skeleton=model.skeleton, fps=model.fps)
+        if n_samples == 1:
+            amass_path = _single_file_path(output_base + "_amass", ".npz")
+            converter.convert_save_npz(output, amass_path)
+            files.append(amass_path)
+        else:
+            out_dir, _, _ = _output_dir_and_path(output_base, "amass", ".npz")
+            amass_path = os.path.join(out_dir, "amass.npz")
+            converter.convert_save_npz(output, amass_path)
+            files.append(amass_path)
+
+    if resolved_model == "kimodo-g1-rp":
+        from kimodo.exports.mujoco import MujocoQposConverter
+
+        converter = MujocoQposConverter(model.skeleton)
+        qpos = converter.dict_to_qpos(output, device)
+        if n_samples == 1:
+            csv_path = _single_file_path(output_base, ".csv")
+            converter.save_csv(qpos, csv_path)
+            files.append(csv_path)
+        else:
+            out_dir, _, base_name = _output_dir_and_path(output_base, "qpos", ".csv")
+            csv_path = os.path.join(out_dir, base_name + ".csv")
+            converter.save_csv(qpos, csv_path)
+            files.append(csv_path)
+
     if export_bvh:
         skeleton = model.skeleton
         if "somaskel" in skeleton.name:
@@ -131,23 +162,103 @@ def save_outputs(output, output_base, export_bvh, bvh_standard_tpose):
     return files
 
 
-def generate(payload):
-    global generation_count
+def save_example_dirs(output_base, texts, num_frames, num_samples, constraints_path):
+    output_stem = os.path.splitext(output_base)[0].rstrip(os.sep)
+    base_name = os.path.basename(output_stem)
+    if num_samples == 1:
+        parent_dir = None
+        example_dirs = [output_stem + "_example"]
+    else:
+        parent_dir = output_stem + "_examples"
+        if os.path.exists(parent_dir):
+            raise FileExistsError(f"Example directory already exists: {parent_dir}")
+        os.makedirs(parent_dir)
+        example_dirs = [
+            os.path.join(parent_dir, f"{base_name}_example_{index:02d}")
+            for index in range(num_samples)
+        ]
+
+    durations_sec = [frame_count / model.fps for frame_count in num_frames]
+    if len(texts) == 1:
+        meta_info = {"text": texts[0], "duration": durations_sec[0]}
+    else:
+        meta_info = {"texts": texts, "durations": durations_sec}
+    meta_info["num_samples"] = num_samples
+
+    files = []
+    for example_dir in example_dirs:
+        os.makedirs(example_dir, exist_ok=False)
+        motion_path = os.path.join(example_dir, "motion.npz")
+        source_path = _single_file_path(output_base, ".npz")
+        if num_samples > 1:
+            index = example_dirs.index(example_dir)
+            source_path = os.path.join(output_stem, f"{base_name}_{index:02d}.npz")
+        shutil.copyfile(source_path, motion_path)
+        files.append(motion_path)
+
+        meta_path = os.path.join(example_dir, "meta.json")
+        save_json(meta_path, meta_info)
+        files.append(meta_path)
+
+        if constraints_path:
+            constraints_copy_path = os.path.join(example_dir, "constraints.json")
+            shutil.copyfile(constraints_path, constraints_copy_path)
+            files.append(constraints_copy_path)
+
+    return files
+
+
+def get_generation_prompts(payload):
+    if isinstance(payload.get("meta"), dict):
+        texts, durations_sec = parse_prompts_from_meta(payload["meta"])
+        return texts, [int(float(duration) * model.fps) for duration in durations_sec]
+
+    if payload.get("inputFolder") or payload.get("input_folder"):
+        input_folder = payload.get("inputFolder") or payload.get("input_folder")
+        meta_path = os.path.join(input_folder, "meta.json")
+        with open(meta_path, "r", encoding="utf-8") as handle:
+            meta = json.load(handle)
+        texts, durations_sec = parse_prompts_from_meta(meta)
+        return texts, [int(float(duration) * model.fps) for duration in durations_sec]
+
+    if isinstance(payload.get("texts"), list):
+        texts = [str(text) for text in payload["texts"]]
+        durations = payload.get("durations") or payload.get("durationSeconds") or payload.get("duration")
+        if not isinstance(durations, list):
+            raise ValueError("When 'texts' is provided, 'durations' must be a list.")
+        if len(texts) != len(durations):
+            raise ValueError("'texts' and 'durations' must have the same length.")
+        return texts, [int(float(duration) * model.fps) for duration in durations]
 
     prompt = str(payload.get("prompt") or payload.get("utterance") or "").strip()
     if not prompt:
-        raise ValueError("Missing prompt or utterance.")
-
-    output_base = str(payload.get("output") or "/outputs/motion")
+        raise ValueError("Missing prompt, utterance, texts, meta, or inputFolder.")
     duration = str(payload.get("durationSeconds") or payload.get("duration") or 4)
-    diffusion_steps = max(1, int(payload.get("diffusionSteps") or payload.get("diffusion_steps") or 20))
-    num_samples = max(1, int(payload.get("numSamples") or payload.get("num_samples") or 1))
+    return get_texts_and_num_frames_from_prompt(prompt, duration, model.fps)
+
+
+def generate(payload):
+    global generation_count
+
+    requested_model = payload.get("model")
+    if requested_model and requested_model != resolved_model and requested_model != display_model:
+        raise ValueError(f"Worker model is {resolved_model}; request asked for {requested_model}.")
+
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    output_base = str(payload.get("output") or "/outputs/motion")
+    diffusion_steps = max(1, int(payload.get("diffusionSteps") or payload.get("diffusion_steps") or meta.get("diffusion_steps") or 20))
+    num_samples = max(1, int(payload.get("numSamples") or payload.get("num_samples") or meta.get("num_samples") or 1))
     num_transition_frames = int(payload.get("numTransitionFrames") or payload.get("num_transition_frames") or 5)
     constraints_path = payload.get("constraints")
+    input_folder = payload.get("inputFolder") or payload.get("input_folder")
+    if constraints_path is None and input_folder:
+        default_constraints_path = os.path.join(input_folder, "constraints.json")
+        if os.path.exists(default_constraints_path):
+            constraints_path = default_constraints_path
     seed = payload.get("seed")
     seed = int(seed) if seed is not None else None
 
-    texts, num_frames = get_texts_and_num_frames_from_prompt(prompt, duration, model.fps)
+    texts, num_frames = get_generation_prompts(payload)
     constraint_lst = load_constraints_lst(constraints_path, model.skeleton) if constraints_path else []
     if seed is not None:
         seed_everything(seed)
@@ -183,6 +294,8 @@ def generate(payload):
             request_bool(payload, "bvh"),
             request_bool(payload, "bvhStandardTpose") or request_bool(payload, "bvh_standard_tpose"),
         )
+        if request_bool(payload, "saveExampleDir") or request_bool(payload, "save_example_dir"):
+            files.extend(save_example_dirs(output_base, texts, num_frames, num_samples, constraints_path))
         generation_count += 1
 
     finished = time.time()
@@ -198,6 +311,8 @@ def generate(payload):
         "clipSeconds": clip_seconds,
         "diffusionSteps": diffusion_steps,
         "numSamples": num_samples,
+        "numTransitionFrames": num_transition_frames,
+        "constraints": constraints_path,
         "seed": seed,
         "files": files,
         "timing": {
