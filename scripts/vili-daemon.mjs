@@ -19,7 +19,7 @@ const dockerHuggingFaceEnv = [
 const dockerHuggingFaceArgs = [
   "-e HF_TOKEN",
   "-e HUGGING_FACE_HUB_TOKEN",
-  "-v /root/.cache/huggingface:/root/.cache/huggingface:ro",
+  "-v /root/.cache/huggingface:/root/.cache/huggingface",
 ].join(" ");
 
 function parseArgs(argv) {
