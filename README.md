@@ -43,8 +43,13 @@ Important routes:
 - `GET /smoke`
 - `POST /motion/generate`
 
-## Current Blocker
+## Current Runtime State
 
-Actual Kimodo generation requires a Hugging Face token with access to gated
-`meta-llama/Meta-Llama-3-8B-Instruct`. Without it, Vili can verify Kimodo and
-CUDA, but generation fails at model fetch.
+Raven has a Hugging Face token installed at
+`/root/.cache/huggingface/token` inside `Ubuntu-24.04`. Vili mounts that token
+read-only into Kimodo containers and passes the standard Hugging Face token
+environment variables.
+
+Verified on `2026-06-12`: the Kimodo container can read gated metadata for
+`meta-llama/Meta-Llama-3-8B-Instruct`. Full motion generation may still need a
+first-run model download/cache warmup.

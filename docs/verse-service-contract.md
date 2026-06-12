@@ -48,6 +48,14 @@ The daemon may reject or defer requests when:
   access.
 - The request omits a concrete prompt.
 
+## Credential State
+
+Raven has a Hugging Face token installed in the `Ubuntu-24.04` WSL cache, and
+Vili mounts it into Kimodo containers read-only. Verified on `2026-06-12`: a
+Kimodo container launched by Raven could read gated metadata for
+`meta-llama/Meta-Llama-3-8B-Instruct`. Full motion generation may still require
+the first large model download/cache warmup.
+
 ## First Runtime Invariant
 
 Health checks must be cheap. They may verify process, port, backend metadata,
