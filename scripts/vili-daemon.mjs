@@ -12,6 +12,9 @@ const projectRoot = path.resolve(__dirname, "..");
 const ravenBaseUrl = process.env.VILI_PUBLIC_BASE_URL || "http://10.77.0.4:8824";
 const ravenDeckUrl = process.env.VILI_PUBLIC_DECK_URL || "ws://10.77.0.4:8824/eve/deck";
 const providerId = "vili.animation";
+const kimodoWorkerName = process.env.VILI_KIMODO_WORKER_NAME || "vili-kimodo-worker";
+const kimodoWorkerPort = Number(process.env.VILI_KIMODO_WORKER_PORT || 8825);
+const kimodoWorkerUrl = `http://127.0.0.1:${kimodoWorkerPort}`;
 const dockerHuggingFaceEnv = [
   "export HF_TOKEN=\"$(cat /root/.cache/huggingface/token 2>/dev/null || true)\"",
   "export HUGGING_FACE_HUB_TOKEN=\"$HF_TOKEN\"",
@@ -50,6 +53,8 @@ let backendStatus = {
   nvidiaRuntime: "unknown",
   huggingFaceToken: "unknown",
   kimodoHelp: "unknown",
+  kimodoWorker: "unknown",
+  kimodoWorkerDetail: null,
   lastError: null,
 };
 
@@ -76,6 +81,20 @@ function run(command, commandArgs, options = {}) {
 
 function wsl(script, options = {}) {
   return run("wsl.exe", ["-d", "Ubuntu-24.04", "-u", "root", "--", "bash", "-lc", script], options);
+}
+
+function shQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
+
+async function wslJson(script, options = {}) {
+  const result = await wsl(script, options);
+  if (!result.ok) return { ...result, body: null };
+  try {
+    return { ...result, body: JSON.parse(result.stdout) };
+  } catch (error) {
+    return { ...result, ok: false, body: null, error: `Invalid JSON: ${error.message}`, stderr: result.stderr };
+  }
 }
 
 function json(response, statusCode, body) {
@@ -141,6 +160,7 @@ function operatorState() {
       owns: [
         "animation job intake",
         "Kimodo runtime checks",
+        "Kimodo resident worker lifecycle",
         "motion artifact references",
         "Vili provider and operator surfaces",
       ],
@@ -180,6 +200,7 @@ function eveSurface() {
           { type: "stat", label: "Docker image", value: state.backend.dockerImage },
           { type: "stat", label: "NVIDIA runtime", value: state.backend.nvidiaRuntime },
           { type: "stat", label: "Kimodo", value: state.backend.kimodoHelp },
+          { type: "stat", label: "Kimodo worker", value: state.backend.kimodoWorker },
           { type: "stat", label: "HF token", value: state.backend.huggingFaceToken },
           { type: "command", label: "Smoke", method: "GET", href: `${ravenBaseUrl}/smoke` },
           { type: "command", label: "Generate motion", method: "POST", href: `${ravenBaseUrl}/motion/generate` },
@@ -212,6 +233,7 @@ async function refreshBackendStatus({ includeKimodoHelp = false } = {}) {
   ].join("; "), { timeout: 20000 });
 
   const token = await wsl("test -f /root/.cache/huggingface/token && echo present || echo missing", { timeout: 10000 });
+  const worker = await kimodoWorkerHealth(20000);
   let help = { ok: true, stdout: backendStatus.kimodoHelp === "ok" ? "ok" : "not checked", stderr: "" };
   if (includeKimodoHelp) {
     nvidia = await wsl([
@@ -233,10 +255,66 @@ async function refreshBackendStatus({ includeKimodoHelp = false } = {}) {
     nvidiaRuntime: nvidia.ok && nvidia.stdout ? nvidia.stdout : "unavailable",
     huggingFaceToken: token.ok ? token.stdout : "unknown",
     kimodoHelp: includeKimodoHelp ? (help.ok ? "ok" : "failed") : backendStatus.kimodoHelp,
+    kimodoWorker: worker.ok && worker.body?.ok ? "resident" : "not running",
+    kimodoWorkerDetail: worker.body || null,
     lastError: [docker, nvidia, token, help].find((result) => !result.ok)?.stderr || null,
   };
   await persistSurfaces();
   return { docker, nvidia, token, help, backendStatus };
+}
+
+async function kimodoWorkerHealth(timeout = 10000) {
+  return wslJson(`curl -fsS --max-time ${Math.ceil(timeout / 1000)} ${shQuote(`${kimodoWorkerUrl}/health`)}`, { timeout });
+}
+
+async function startKimodoWorker() {
+  const script = [
+    "set -e",
+    "service docker start >/dev/null 2>&1 || true",
+    dockerHuggingFaceEnv,
+    "mkdir -p /mnt/e/Projects/Vili/.vili/artifacts /mnt/e/Projects/Vili/.vili/logs",
+    "if ! kill -0 $(cat /tmp/vili-wsl-keepalive.pid 2>/dev/null) >/dev/null 2>&1; then nohup bash -c 'while true; do sleep 3600; done' >/tmp/vili-wsl-keepalive.log 2>&1 & echo $! >/tmp/vili-wsl-keepalive.pid; fi",
+    `if docker ps --format '{{.Names}}' | grep -qx ${shQuote(kimodoWorkerName)}; then echo running; exit 0; fi`,
+    `docker rm -f ${shQuote(kimodoWorkerName)} >/dev/null 2>&1 || true`,
+    [
+      "docker run -d",
+      `--name ${shQuote(kimodoWorkerName)}`,
+      "--runtime=nvidia --gpus all",
+      `-p 127.0.0.1:${kimodoWorkerPort}:${kimodoWorkerPort}`,
+      dockerHuggingFaceArgs,
+      "-e TEXT_ENCODER_DEVICE=cpu",
+      "-v /mnt/e/Projects/Vili/scripts/kimodo-resident-worker.py:/opt/vili/kimodo-resident-worker.py:ro",
+      "-v /mnt/e/Projects/Vili/.vili/artifacts:/outputs",
+      "gamecult/kimodo:latest",
+      "python",
+      "/opt/vili/kimodo-resident-worker.py",
+      `--port ${kimodoWorkerPort}`,
+    ].join(" "),
+  ].join("; ");
+  return wsl(script, { timeout: 30000 });
+}
+
+async function ensureKimodoWorker({ timeoutMs = 1000 * 60 * 8 } = {}) {
+  const health = await kimodoWorkerHealth(10000);
+  if (health.ok && health.body?.ok) return health;
+
+  const started = await startKimodoWorker();
+  if (!started.ok) return started;
+
+  const deadline = Date.now() + timeoutMs;
+  let last = started;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+    last = await kimodoWorkerHealth(10000);
+    if (last.ok && last.body?.ok) return last;
+  }
+  return {
+    ok: false,
+    stdout: last.stdout || "",
+    stderr: last.stderr || "",
+    error: `Kimodo worker did not become healthy within ${timeoutMs}ms.`,
+    body: last.body || null,
+  };
 }
 
 async function readRequestBody(request) {
@@ -276,32 +354,33 @@ async function generateMotion(request, response) {
   if (Number.isFinite(seed)) meta.seed = seed;
   if (body.cfg) meta.cfg = body.cfg;
   await writeFile(path.join(artifactDir, "meta.json"), JSON.stringify(meta, null, 2));
-  const linuxOutput = `/mnt/e/Projects/Vili/.vili/artifacts/${jobId}`;
-  const outputStem = "/outputs/motion";
-  const optionalArgs = [];
-  if (Number.isFinite(seed)) optionalArgs.push("--seed", `${seed}`);
-  if (body.bvh === true) optionalArgs.push("--bvh");
-  const command = [
-    "set -e",
-    "service docker start >/dev/null 2>&1 || true",
-    dockerHuggingFaceEnv,
-    `mkdir -p ${linuxOutput}`,
-    [
-      "docker run --rm --runtime=nvidia --gpus all",
-      dockerHuggingFaceArgs,
-      "-e TEXT_ENCODER_DEVICE=cpu",
-      `-v /mnt/e/Projects/Vili/.vili/artifacts/${jobId}:/outputs`,
-      "gamecult/kimodo:latest",
-      "kimodo_gen",
-      `--output ${outputStem}`,
-      "--input_folder /outputs",
-      optionalArgs.join(" "),
-    ].join(" "),
-  ].join("; ");
-
-  const result = await wsl(command, {
-    timeout: Number(body.timeoutMs || 1000 * 60 * 30),
-  });
+  const worker = await ensureKimodoWorker({ timeoutMs: Number(body.workerTimeoutMs || 1000 * 60 * 8) });
+  let result = worker;
+  if (worker.ok) {
+    const workerRequest = {
+      prompt,
+      duration,
+      diffusionSteps,
+      numSamples: meta.num_samples,
+      seed: Number.isFinite(seed) ? seed : undefined,
+      cfg: body.cfg,
+      bvh: body.bvh === true,
+      bvhStandardTpose: body.bvhStandardTpose === true || body.bvh_standard_tpose === true,
+      noPostprocess: body.noPostprocess === true || body.no_postprocess === true,
+      output: `/outputs/${jobId}/motion`,
+    };
+    await writeFile(path.join(artifactDir, "request.json"), JSON.stringify(workerRequest, null, 2));
+    const curlCommand = [
+      `curl -fsS --max-time ${Math.ceil(Number(body.timeoutMs || 1000 * 60 * 30) / 1000)}`,
+      "-H 'content-type: application/json'",
+      `--data-binary @${shQuote(`/mnt/e/Projects/Vili/.vili/artifacts/${jobId}/request.json`)}`,
+      shQuote(`${kimodoWorkerUrl}/generate`),
+    ].join(" ");
+    result = await wslJson([
+      "set -e",
+      curlCommand,
+    ].join("; "), { timeout: Number(body.timeoutMs || 1000 * 60 * 30) });
+  }
 
   const job = {
     schema: "gamecult.vili.motion_job.v0",
@@ -316,6 +395,7 @@ async function generateMotion(request, response) {
     stdout: result.stdout,
     stderr: result.stderr,
     error: result.error,
+    worker: result.body,
   };
   await writeFile(path.join(args.stateRoot, "jobs", `${jobId}.json`), JSON.stringify(job, null, 2)).catch(async () => {
     await mkdir(path.join(args.stateRoot, "jobs"), { recursive: true });
@@ -356,7 +436,10 @@ async function handleRequest(request, response) {
     });
   } else if (url.pathname === "/smoke") {
     const result = await refreshBackendStatus({ includeKimodoHelp: true });
-    json(response, result.backendStatus.kimodoHelp === "ok" ? 200 : 502, { ok: result.backendStatus.kimodoHelp === "ok", ...result });
+    const worker = await ensureKimodoWorker();
+    await refreshBackendStatus({ includeKimodoHelp: false });
+    const ok = result.backendStatus.kimodoHelp === "ok" && worker.ok && worker.body?.ok;
+    json(response, ok ? 200 : 502, { ok, ...result, worker: worker.body || worker });
   } else if (url.pathname === "/motion/generate" && request.method === "POST") {
     await generateMotion(request, response);
   } else {
