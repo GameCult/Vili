@@ -11,6 +11,8 @@
     "provider": "node scripts/vili-daemon.mjs --print-provider-advertisement"
   },
   "dependencies": {
+    "@msgpack/msgpack": "^3.1.3",
+    "cultnet-ts": "file:../CultLib/packages/cultnet-ts",
     "ws": "^8.18.0"
   }
 }

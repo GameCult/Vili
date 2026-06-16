@@ -1,7 +1,11 @@
 param(
   [int]$Port = 8824,
   [string]$HostName = "0.0.0.0",
-  [string]$StateRoot = "E:\Projects\Vili\.vili"
+  [string]$StateRoot = "E:\Projects\Vili\.vili",
+  [string]$IdunnRudpHealth = "10.77.0.2:17870",
+  [string]$IdunnDaemon = "vili",
+  [string]$IdunnHealthContract = "vili.cultnet-rudp-animation-health",
+  [int]$IdunnHealthIntervalSeconds = 15
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,5 +35,12 @@ if (Get-ScheduledTask -TaskName "Vili" -TaskPath "\GameCult\" -ErrorAction Silen
   }
   Write-Host "Vili restarted through scheduled task $TaskName"
 } else {
-  & (Join-Path $PSScriptRoot "start-vili-daemon.ps1") -Port $Port -HostName $HostName -StateRoot $StateRoot
+  & (Join-Path $PSScriptRoot "start-vili-daemon.ps1") `
+    -Port $Port `
+    -HostName $HostName `
+    -StateRoot $StateRoot `
+    -IdunnRudpHealth $IdunnRudpHealth `
+    -IdunnDaemon $IdunnDaemon `
+    -IdunnHealthContract $IdunnHealthContract `
+    -IdunnHealthIntervalSeconds $IdunnHealthIntervalSeconds
 }

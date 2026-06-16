@@ -33,6 +33,20 @@ Default compatibility endpoint:
 http://10.77.0.4:8824
 ```
 
+Vili publishes daemon-owned Idunn health over CultNet/RUDP when launched with
+the default scheduled-task/startup scripts:
+
+```text
+daemon: vili
+contract: vili.cultnet-rudp-animation-health
+transport: cultnet.transport.rudp.v0
+Idunn endpoint: 10.77.0.2:17870
+```
+
+`GET /health`, HTTP routes, and the WebSocket deck are compatibility/operator
+lowerings. They do not own daemon truth once Idunn has a fresh
+`idunn.daemon_health` record from Vili's RUDP publisher.
+
 Important routes:
 
 - `GET /health`
