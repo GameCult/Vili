@@ -5,6 +5,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 $PidPath = Join-Path $StateRoot "vili-daemon.pid"
 $TaskName = "GameCult\Vili"
 
