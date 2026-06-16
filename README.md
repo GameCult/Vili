@@ -47,6 +47,16 @@ Idunn endpoint: 10.77.0.2:17870
 lowerings. They do not own daemon truth once Idunn has a fresh
 `idunn.daemon_health` record from Vili's RUDP publisher.
 
+Vili also writes daemon-owned service state to:
+
+```text
+E:\Projects\Vili\.vili\vili.service.cc
+```
+
+That CultCache store owns the provider advertisement, operator state, Eve
+surface, command boundary, and transport profile. The adjacent JSON files are
+compatibility exports for tools that have not learned the `.cc` store yet.
+
 Important routes:
 
 - `GET /health`

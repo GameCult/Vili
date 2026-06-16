@@ -15,11 +15,18 @@ const {
   createIdunnRudpHealthPublisher,
   publishIdunnRudpHealth,
 } = require("./idunn-rudp.cjs");
+const {
+  CultCache,
+  SingleFileMessagePackBackingStore,
+  defineDocumentRegistry,
+  defineDocumentType,
+} = require("cultcache-ts");
 const projectRoot = path.resolve(__dirname, "..");
 const ravenBaseUrl = process.env.VILI_PUBLIC_BASE_URL || "http://10.77.0.4:8824";
 const ravenDeckUrl = process.env.VILI_PUBLIC_DECK_URL || "ws://10.77.0.4:8824/eve/deck";
 const providerId = "vili.animation";
 const idunnHealthContract = "vili.cultnet-rudp-animation-health";
+const viliStoreFileName = "vili.service.cc";
 const kimodoWorkerName = process.env.VILI_KIMODO_WORKER_NAME || "vili-kimodo-worker";
 const kimodoWorkerPort = Number(process.env.VILI_KIMODO_WORKER_PORT || 8825);
 const kimodoWorkerUrl = `http://127.0.0.1:${kimodoWorkerPort}`;
@@ -32,6 +39,87 @@ const dockerHuggingFaceArgs = [
   "-e HUGGING_FACE_HUB_TOKEN",
   "-v /root/.cache/huggingface:/root/.cache/huggingface",
 ].join(" ");
+const objectSchema = { parse: (value) => value };
+const providerAdvertisementDefinition = defineDocumentType({
+  type: "gamecult.eve.provider_advertisement",
+  schemaName: "gamecult.eve.provider_advertisement",
+  schemaId: "gamecult.eve.provider_advertisement.v1",
+  schemaVersion: "gamecult.eve.provider_advertisement.v1",
+  name: (value) => value?.providerId || "provider",
+  schema: objectSchema,
+  members: [
+    { slot: 0, memberName: "providerId", typeName: "string", isName: true },
+    { slot: 1, memberName: "title", typeName: "string" },
+    { slot: 2, memberName: "verseId", typeName: "string" },
+    { slot: 3, memberName: "updatedAt", typeName: "string" },
+  ],
+});
+const operatorStateDefinition = defineDocumentType({
+  type: "gamecult.vili.operator_state",
+  schemaName: "gamecult.vili.operator_state",
+  schemaId: "gamecult.vili.operator_state.v1",
+  schemaVersion: "gamecult.vili.operator_state.v1",
+  name: (value) => value?.service || "vili",
+  schema: objectSchema,
+  members: [
+    { slot: 0, memberName: "service", typeName: "string", isName: true },
+    { slot: 1, memberName: "providerId", typeName: "string" },
+    { slot: 2, memberName: "updatedAt", typeName: "string" },
+    { slot: 3, memberName: "backend", typeName: "object" },
+    { slot: 4, memberName: "idunnRudpHealth", typeName: "object" },
+  ],
+});
+const eveSurfaceDefinition = defineDocumentType({
+  type: "gamecult.eve.surface_state",
+  schemaName: "gamecult.eve.surface_state",
+  schemaId: "gamecult.eve.surface_state.v1",
+  schemaVersion: "gamecult.eve.surface_state.v1",
+  name: (value) => value?.providerId || "surface",
+  schema: objectSchema,
+  members: [
+    { slot: 0, memberName: "providerId", typeName: "string", isName: true },
+    { slot: 1, memberName: "title", typeName: "string" },
+    { slot: 2, memberName: "updatedAt", typeName: "string" },
+    { slot: 3, memberName: "surface", typeName: "object" },
+  ],
+});
+const commandBoundaryDefinition = defineDocumentType({
+  type: "gamecult.vili.command_boundary",
+  schemaName: "gamecult.vili.command_boundary",
+  schemaId: "gamecult.vili.command_boundary.v1",
+  schemaVersion: "gamecult.vili.command_boundary.v1",
+  name: (value) => value?.boundaryId || "vili",
+  schema: objectSchema,
+  members: [
+    { slot: 0, memberName: "boundaryId", typeName: "string", isName: true },
+    { slot: 1, memberName: "owner", typeName: "string" },
+    { slot: 2, memberName: "commandAuthority", typeName: "object" },
+    { slot: 3, memberName: "forbiddenAuthority", typeName: "string" },
+    { slot: 4, memberName: "updatedAt", typeName: "string" },
+  ],
+});
+const transportProfileDefinition = defineDocumentType({
+  type: "gamecult.vili.transport_profile",
+  schemaName: "gamecult.vili.transport_profile",
+  schemaId: "gamecult.vili.transport_profile.v1",
+  schemaVersion: "gamecult.vili.transport_profile.v1",
+  name: (value) => value?.profileId || "vili",
+  schema: objectSchema,
+  members: [
+    { slot: 0, memberName: "profileId", typeName: "string", isName: true },
+    { slot: 1, memberName: "daemonId", typeName: "string" },
+    { slot: 2, memberName: "targetTransport", typeName: "string" },
+    { slot: 3, memberName: "state", typeName: "string" },
+    { slot: 4, memberName: "updatedAt", typeName: "string" },
+  ],
+});
+const viliDocumentRegistry = defineDocumentRegistry(
+  providerAdvertisementDefinition,
+  operatorStateDefinition,
+  eveSurfaceDefinition,
+  commandBoundaryDefinition,
+  transportProfileDefinition,
+);
 
 function parseArgs(argv) {
   const args = {
@@ -225,6 +313,67 @@ function operatorState() {
   };
 }
 
+function commandBoundary() {
+  return {
+    schema: "gamecult.vili.command_boundary.v1",
+    boundaryId: "vili",
+    daemonId: args.idunnDaemon,
+    owner: "Vili animation runtime",
+    updatedAt: new Date().toISOString(),
+    commandAuthority: {
+      intake: {
+        method: "POST",
+        path: "/motion/generate",
+        owns: [
+          "animation job identity",
+          "request persistence",
+          "Kimodo resident worker lifecycle",
+          "timeout handling",
+          "motion artifact references",
+        ],
+      },
+      smoke: {
+        method: "GET",
+        path: "/smoke",
+        owns: ["backend readiness proof", "resident worker warmup"],
+      },
+      liveness: {
+        method: "GET",
+        path: "/health",
+        owns: ["compatibility liveness witness"],
+        doesNotOwn: ["daemon truth when fresh RUDP health exists"],
+      },
+    },
+    forbiddenAuthority:
+      "HTTP health, WebSocket decks, and JSON sidecars are compatibility/operator lowerings; they do not own daemon health or provider truth when CultCache/CultNet records exist.",
+  };
+}
+
+function transportProfile() {
+  return {
+    schema: "gamecult.vili.transport_profile.v1",
+    profileId: "vili",
+    daemonId: args.idunnDaemon,
+    targetTransport: CULTNET_RUDP_PROTOCOL_ID,
+    currentTransport: idunnRudpHealthPublisher
+      ? "daemon-published-rudp-health + CultCache local state + compatibility HTTP/WS lowerings"
+      : "CultCache local state + compatibility HTTP/WS lowerings",
+    state: idunnRudpHealthPublisher ? "rudp-health-enabled" : "local-cultcache-only",
+    healthContract: args.idunnHealthContract,
+    providerAdvertisementSchema: "gamecult.eve.provider_advertisement.v1",
+    operatorStateSchema: "gamecult.vili.operator_state.v1",
+    commandBoundarySchema: "gamecult.vili.command_boundary.v1",
+    compatibilityMechanisms: [
+      `${ravenBaseUrl}/health`,
+      `${ravenBaseUrl}/provider-advertisement`,
+      `${ravenDeckUrl}/${providerId}`,
+    ],
+    cutLine:
+      "Vili owns typed provider, operator, command, transport, and RUDP health state. HTTP/WS/JSON projections are lowerings until Odin consumes Vili provider records over CultNet/RUDP.",
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 function viliHealthDetail() {
   const worker = backendStatus.kimodoWorker || "unknown";
   return `Vili animation daemon active on Raven; Kimodo worker ${worker}; HTTP/WS are compatibility lowerings.`;
@@ -301,10 +450,25 @@ function eveSurface() {
 
 async function persistSurfaces() {
   await mkdir(args.stateRoot, { recursive: true });
+  await persistCultCacheSurfaces();
   await writeFile(path.join(args.stateRoot, "vili-daemon.pid"), `${process.pid}\n`);
   await writeFile(path.join(args.stateRoot, "provider-advertisement.json"), JSON.stringify(providerAdvertisement(), null, 2));
   await writeFile(path.join(args.stateRoot, "operator-state.json"), JSON.stringify(operatorState(), null, 2));
   await writeFile(path.join(args.stateRoot, "eve-operator-surface.json"), JSON.stringify(eveSurface(), null, 2));
+  await writeFile(path.join(args.stateRoot, "command-boundary.json"), JSON.stringify(commandBoundary(), null, 2));
+  await writeFile(path.join(args.stateRoot, "transport-profile.json"), JSON.stringify(transportProfile(), null, 2));
+}
+
+async function persistCultCacheSurfaces() {
+  const cache = CultCache.builder()
+    .withRegistry(viliDocumentRegistry)
+    .withGenericStore(new SingleFileMessagePackBackingStore(path.join(args.stateRoot, viliStoreFileName)))
+    .build();
+  await cache.put(providerAdvertisementDefinition, providerId, providerAdvertisement());
+  await cache.put(operatorStateDefinition, "vili", operatorState());
+  await cache.put(eveSurfaceDefinition, providerId, eveSurface());
+  await cache.put(commandBoundaryDefinition, "vili", commandBoundary());
+  await cache.put(transportProfileDefinition, "vili", transportProfile());
 }
 
 async function refreshBackendStatus({ includeKimodoHelp = false } = {}) {

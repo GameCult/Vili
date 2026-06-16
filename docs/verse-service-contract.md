@@ -18,17 +18,27 @@ is a resident worker container that owns model lifetime for generation requests.
 
 ## Witnesses
 
-- `.vili/provider-advertisement.json`: compatibility provider advertisement.
-- `.vili/operator-state.json`: daemon health and backend readiness.
-- `.vili/eve-operator-surface.json`: current operator surface.
+- `.vili/vili.service.cc`: Vili-owned CultCache store for provider
+  advertisement, operator state, Eve surface, command boundary, and transport
+  profile records.
+- `.vili/provider-advertisement.json`: compatibility export derived from the
+  provider advertisement record.
+- `.vili/operator-state.json`: compatibility export derived from daemon health
+  and backend readiness.
+- `.vili/eve-operator-surface.json`: compatibility export of the current
+  operator surface.
+- `.vili/command-boundary.json`: compatibility export of Vili command
+  authority.
+- `.vili/transport-profile.json`: compatibility export of Vili transport
+  state.
 - `.vili/jobs/{jobId}.json`: accepted animation job records.
 - `.vili/artifacts/{jobId}/`: generated motion outputs when generation succeeds.
 - `vili-kimodo-worker`: resident Docker container exposing the loaded Kimodo
   model to Vili inside Raven's `Ubuntu-24.04` WSL runtime.
 
-JSON is currently a compatibility witness because Raven's first Vili body is a
-small Node daemon. Promotion to `.cc` CultCache witnesses should happen when the
-animation job schema stabilizes.
+JSON is a compatibility witness. Vili's service/operator/command/transport
+truth is the daemon-owned `.cc` store; animation job schemas may still be
+promoted from JSON once that request/receipt shape stabilizes.
 
 ## Command Boundary
 
