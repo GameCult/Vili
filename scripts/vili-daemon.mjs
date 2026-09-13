@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import http from "node:http";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
@@ -795,9 +794,6 @@ if (args.health) {
 } else {
   await mkdir(path.join(args.stateRoot, "jobs"), { recursive: true });
   await persistSurfaces();
-  if (!existsSync(path.join(args.stateRoot, "backend-status.json"))) {
-    await writeFile(path.join(args.stateRoot, "backend-status.json"), JSON.stringify(backendStatus, null, 2));
-  }
 
   const server = http.createServer((request, response) => {
     handleRequest(request, response).catch((error) => {
