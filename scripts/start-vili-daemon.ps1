@@ -1,11 +1,7 @@
 param(
   [int]$Port = 8824,
   [string]$HostName = "0.0.0.0",
-  [string]$StateRoot = "E:\Projects\Vili\.vili",
-  [string]$IdunnRudpHealth = "10.77.0.2:17870",
-  [string]$IdunnDaemon = "vili",
-  [string]$IdunnHealthContract = "vili.cultnet-rudp-animation-health",
-  [int]$IdunnHealthIntervalSeconds = 15
+  [string]$StateRoot = "E:\Projects\Vili\.vili"
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,11 +29,7 @@ $args = @(
   (Join-Path $Root "scripts\vili-daemon.mjs"),
   "--host", $HostName,
   "--port", "$Port",
-  "--state-root", $StateRoot,
-  "--idunn-rudp-health", $IdunnRudpHealth,
-  "--idunn-daemon", $IdunnDaemon,
-  "--idunn-health-contract", $IdunnHealthContract,
-  "--idunn-health-interval-seconds", "$IdunnHealthIntervalSeconds"
+  "--state-root", $StateRoot
 )
 
 $process = Start-Process -FilePath $Node -ArgumentList $args -WorkingDirectory $Root -WindowStyle Hidden -RedirectStandardOutput $OutLog -RedirectStandardError $ErrLog -PassThru

@@ -10,11 +10,6 @@ import { WebSocketServer } from "ws";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const {
-  CULTNET_RUDP_PROTOCOL_ID,
-  createIdunnRudpHealthPublisher,
-  publishIdunnRudpHealth,
-} = require("./idunn-rudp.cjs");
-const {
   CultCache,
   SingleFileMessagePackBackingStore,
   defineDocumentRegistry,
@@ -24,7 +19,6 @@ const projectRoot = path.resolve(__dirname, "..");
 const ravenBaseUrl = process.env.VILI_PUBLIC_BASE_URL || "http://10.77.0.4:8824";
 const ravenDeckUrl = process.env.VILI_PUBLIC_DECK_URL || "ws://10.77.0.4:8824/eve/deck";
 const providerId = "vili.animation";
-const idunnHealthContract = "vili.cultnet-rudp-animation-health";
 const viliStoreFileName = "vili.service.cc";
 const kimodoWorkerName = process.env.VILI_KIMODO_WORKER_NAME || "vili-kimodo-worker";
 const kimodoWorkerPort = Number(process.env.VILI_KIMODO_WORKER_PORT || 8825);
@@ -65,7 +59,6 @@ const operatorStateDefinition = defineDocumentType({
     { slot: 1, memberName: "providerId", typeName: "string" },
     { slot: 2, memberName: "updatedAt", typeName: "string" },
     { slot: 3, memberName: "backend", typeName: "object" },
-    { slot: 4, memberName: "idunnRudpHealth", typeName: "object" },
   ],
 });
 const eveSurfaceDefinition = defineDocumentType({
@@ -125,10 +118,6 @@ function parseArgs(argv) {
     host: process.env.VILI_DAEMON_HOST || "127.0.0.1",
     port: Number(process.env.VILI_DAEMON_PORT || 8824),
     stateRoot: process.env.VILI_STATE_ROOT || path.join(projectRoot, ".vili"),
-    idunnRudpHealth: process.env.VILI_IDUNN_RUDP_HEALTH || null,
-    idunnDaemon: process.env.VILI_IDUNN_DAEMON || "vili",
-    idunnHealthContract: process.env.VILI_IDUNN_HEALTH_CONTRACT || idunnHealthContract,
-    idunnHealthIntervalSeconds: Number(process.env.VILI_IDUNN_HEALTH_INTERVAL_SECONDS || 15),
     health: false,
     printProviderAdvertisement: false,
   };
@@ -138,10 +127,6 @@ function parseArgs(argv) {
     if (arg === "--host") args.host = argv[++index];
     else if (arg === "--port") args.port = Number(argv[++index]);
     else if (arg === "--state-root") args.stateRoot = path.resolve(argv[++index]);
-    else if (arg === "--idunn-rudp-health") args.idunnRudpHealth = argv[++index];
-    else if (arg === "--idunn-daemon") args.idunnDaemon = argv[++index];
-    else if (arg === "--idunn-health-contract") args.idunnHealthContract = argv[++index];
-    else if (arg === "--idunn-health-interval-seconds") args.idunnHealthIntervalSeconds = Number(argv[++index]);
     else if (arg === "--health") args.health = true;
     else if (arg === "--print-provider-advertisement") args.printProviderAdvertisement = true;
   }
@@ -150,12 +135,6 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv.slice(2));
 const startedAt = new Date().toISOString();
-const idunnRudpHealthPublisher = createIdunnRudpHealthPublisher(args.idunnRudpHealth ? {
-  endpoint: args.idunnRudpHealth,
-  daemonId: args.idunnDaemon,
-  healthContract: args.idunnHealthContract,
-  sourceRuntimeId: "vili-daemon",
-} : null);
 let backendStatus = {
   checkedAt: null,
   dockerImage: "unknown",
@@ -165,17 +144,6 @@ let backendStatus = {
   kimodoWorker: "unknown",
   kimodoWorkerDetail: null,
   lastError: null,
-};
-let idunnRudpHealthStatus = {
-  endpoint: args.idunnRudpHealth,
-  daemon: args.idunnDaemon,
-  contract: args.idunnHealthContract,
-  transport: CULTNET_RUDP_PROTOCOL_ID,
-  status: idunnRudpHealthPublisher ? "pending" : "disabled",
-  lastPublishedAt: null,
-  lastErrorAt: null,
-  error: "",
-  inFlight: false,
 };
 
 function run(command, commandArgs, options = {}) {
@@ -284,7 +252,6 @@ function operatorState() {
     startedAt,
     updatedAt: new Date().toISOString(),
     backend: backendStatus,
-    idunnRudpHealth: idunnRudpHealthStatus,
     authority: {
       owns: [
         "animation job intake",
@@ -316,7 +283,7 @@ function commandBoundary() {
   return {
     schema: "gamecult.vili.command_boundary.v1",
     boundaryId: "vili",
-    daemonId: args.idunnDaemon,
+    daemonId: "vili",
     owner: "Vili animation runtime",
     updatedAt: new Date().toISOString(),
     commandAuthority: {
@@ -340,7 +307,7 @@ function commandBoundary() {
         method: "GET",
         path: "/health",
         owns: ["compatibility liveness witness"],
-        doesNotOwn: ["daemon truth when fresh RUDP health exists"],
+        doesNotOwn: [],
       },
     },
     forbiddenAuthority:
@@ -352,13 +319,10 @@ function transportProfile() {
   return {
     schema: "gamecult.vili.transport_profile.v1",
     profileId: "vili",
-    daemonId: args.idunnDaemon,
-    targetTransport: CULTNET_RUDP_PROTOCOL_ID,
-    currentTransport: idunnRudpHealthPublisher
-      ? "daemon-published-rudp-health + CultCache local state + compatibility HTTP/WS lowerings"
-      : "CultCache local state + compatibility HTTP/WS lowerings",
-    state: idunnRudpHealthPublisher ? "rudp-health-enabled" : "local-cultcache-only",
-    healthContract: args.idunnHealthContract,
+    daemonId: "vili",
+    targetTransport: "cultnet.transport.rudp.v0",
+    currentTransport: "CultCache local state + compatibility HTTP/WS lowerings",
+    state: "local-cultcache-only",
     providerAdvertisementSchema: "gamecult.eve.provider_advertisement.v1",
     operatorStateSchema: "gamecult.vili.operator_state.v1",
     commandBoundarySchema: "gamecult.vili.command_boundary.v1",
@@ -368,55 +332,9 @@ function transportProfile() {
       `${ravenDeckUrl}/${providerId}`,
     ],
     cutLine:
-      "Vili owns typed provider, operator, command, transport, and RUDP health state. HTTP/WS/JSON projections are lowerings until Odin consumes Vili provider records over CultNet/RUDP.",
+      "Vili owns typed provider, operator, command, and transport state. HTTP/WS/JSON projections are lowerings until Odin consumes Vili provider records over CultNet/RUDP.",
     updatedAt: new Date().toISOString(),
   };
-}
-
-function viliHealthDetail() {
-  const worker = backendStatus.kimodoWorker || "unknown";
-  return `Vili animation daemon active on Raven; Kimodo worker ${worker}; HTTP/WS are compatibility lowerings.`;
-}
-
-async function publishIdunnHealthOnce() {
-  if (!idunnRudpHealthPublisher || idunnRudpHealthStatus.inFlight) return;
-  const observedAt = new Date().toISOString();
-  idunnRudpHealthStatus = {
-    ...idunnRudpHealthStatus,
-    status: "publishing",
-    inFlight: true,
-    error: "",
-  };
-  try {
-    await publishIdunnRudpHealth(idunnRudpHealthPublisher, {
-      state: "active",
-      detail: viliHealthDetail(),
-      observedAt,
-    });
-    idunnRudpHealthStatus = {
-      ...idunnRudpHealthStatus,
-      status: "published",
-      lastPublishedAt: observedAt,
-      inFlight: false,
-      error: "",
-    };
-  } catch (error) {
-    idunnRudpHealthStatus = {
-      ...idunnRudpHealthStatus,
-      status: "failed",
-      lastErrorAt: new Date().toISOString(),
-      inFlight: false,
-      error: error.message,
-    };
-  }
-  await persistSurfaces();
-}
-
-function startIdunnHealthPublisher() {
-  if (!idunnRudpHealthPublisher) return;
-  publishIdunnHealthOnce().catch((error) => console.error(error));
-  const intervalMs = Math.max(5, args.idunnHealthIntervalSeconds) * 1000;
-  setInterval(() => publishIdunnHealthOnce().catch((error) => console.error(error)), intervalMs);
 }
 
 function eveSurface() {
@@ -824,6 +742,5 @@ if (args.health) {
     console.log(`Vili listening on http://${args.host}:${args.port}`);
   });
 
-  startIdunnHealthPublisher();
   setInterval(() => persistSurfaces().catch((error) => console.error(error)), 5000);
 }

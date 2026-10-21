@@ -17,7 +17,7 @@ first backend is Kimodo on Raven, running through Docker Engine inside
 - Future renderers own retargeting, playback, facial performance, camera, and
   lip sync.
 - Odin discovers Vili; Odin does not own Vili's state.
-- Idunn keeps Vili alive; Idunn does not own animation decisions.
+- Vili is kept alive by its scheduled task on Raven today; Idunn would not own animation decisions.
 
 ## Local Runtime
 
@@ -33,19 +33,9 @@ Default compatibility endpoint:
 http://10.77.0.4:8824
 ```
 
-Vili publishes daemon-owned Idunn health over CultNet/RUDP when launched with
-the default scheduled-task/startup scripts:
-
-```text
-daemon: vili
-contract: vili.cultnet-rudp-animation-health
-transport: cultnet.transport.rudp.v0
-Idunn endpoint: 10.77.0.2:17870
-```
-
-`GET /health`, HTTP routes, and the WebSocket deck are compatibility/operator
-lowerings. They do not own daemon truth once Idunn has a fresh
-`idunn.daemon_health` record from Vili's RUDP publisher.
+Vili is not an Idunn target today. Its lifecycle is the `GameCult\Vili`
+scheduled task on Raven, and `GET /health` is an operator lowering. Admission
+to Idunn is motion-pipeline:question:vili-under-idunn.
 
 Vili also writes daemon-owned service state to:
 
