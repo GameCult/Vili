@@ -51,6 +51,9 @@ class PlanPlacement(unittest.TestCase):
     def test_the_gpu_reserve_exceeds_the_old_one_that_crashed_at_the_card_ceiling(self):
         self.assertGreater(te.GPU_RESERVE, int(1.5 * GIB))
 
+    def test_exactly_two_gib_free_is_admitted(self):
+        self.assertEqual(te.plan_placement(2 * GIB, 10 * GIB)[0], 2 * GIB - te.GPU_RESERVE)
+
     def test_ram_below_the_reserve_never_goes_negative(self):
         self.assertEqual(te.plan_placement(12 * GIB, GIB)["cpu"], 0)
 
@@ -124,6 +127,22 @@ class CachedEncoder(unittest.TestCase):
                 encoder([SECRET])
             self.assertNotIn(SECRET, str(raised.exception))
             self.assertEqual(encoder.count(), 0)
+
+    def test_a_child_answer_with_too_few_vectors_is_refused_and_stores_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            encoder = open_encoder(directory, lambda texts: {"vectors": [vector(1)], "placement": {}})
+            with self.assertRaises(RuntimeError):
+                encoder(["aa", "bb"])
+            self.assertEqual(encoder.count(), 0)
+
+    def test_kimodos_text_dimension_is_4096(self):
+        self.assertEqual(te.EMBEDDING_DIM, 4096)
+        self.assertEqual(te.EMBEDDING_BYTES, 4096 * 4)
+        with tempfile.TemporaryDirectory() as directory:
+            encoder = open_encoder(directory, FakeChild())
+            features, _ = encoder(["aa"])
+            self.assertEqual(tuple(features.shape), (1, 1, 4096))
+            self.assertEqual(encoder.store.get_all(te.TEXT_EMBEDDING)[0].dim, 4096)
 
     def test_gpu_busy_propagates_without_a_cpu_path_and_stores_nothing(self):
         def busy(texts):
