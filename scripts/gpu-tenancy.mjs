@@ -73,7 +73,7 @@ export async function admitThen(gate, job) {
 
 // nvidia-smi's first line is the free MiB as a base-10 integer; anything else is null.
 export function parseFreeMiB(stdout) {
-  const line = String(stdout ?? "").split("\n")[0].trim();
+  const line = String(stdout).split("\n")[0].trim();
   return /^\d+$/.test(line) ? Number(line) : null;
 }
 
