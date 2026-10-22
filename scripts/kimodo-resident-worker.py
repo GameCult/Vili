@@ -4,7 +4,6 @@ import json
 import os
 import shutil
 import time
-import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
 from types import SimpleNamespace
@@ -394,11 +393,7 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
             write_json(self, 200, generate(payload))
         except Exception as error:
-            write_json(self, 500, {
-                "ok": False,
-                "error": str(error),
-                "traceback": traceback.format_exc(),
-            })
+            write_json(self, 500, text_encoding.worker_error_body(error))
 
     def log_message(self, fmt, *values):
         print(f"{self.address_string()} - {fmt % values}", flush=True)

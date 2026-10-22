@@ -180,6 +180,12 @@ class ChildBoundary(unittest.TestCase):
             """)
         self.assertEqual(raised.exception.free_vram, 1234)
 
+    def test_worker_error_body_carries_the_code(self):
+        busy = te.worker_error_body(te.GpuBusy(GIB))
+        self.assertIs(busy["ok"], False)
+        self.assertEqual(busy["code"], "gpu-busy")
+        self.assertIsNone(te.worker_error_body(RuntimeError("x"))["code"])
+
     def test_other_failures_name_the_exit_code_and_never_the_text(self):
         with self.assertRaises(RuntimeError) as raised:
             self.run_stub("import sys; sys.exit(1)", texts=(SECRET,))

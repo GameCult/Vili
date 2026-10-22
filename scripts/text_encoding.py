@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,7 +34,11 @@ LLAMA_BASE = "meta-llama/Meta-Llama-3-8B-Instruct"  # the base model the mntp ad
 
 
 class GpuBusy(RuntimeError):
-    """The card has too little free VRAM to host the encoder; there is no CPU fallback."""
+    """Placement refusal: too little free VRAM to host the encoder, and no CPU fallback.
+
+    Whether heavy work may start at all is the daemon's tenancy gate, which sees the host; this is only
+    the child sizing its own placement from what torch can see.
+    """
 
     code = "gpu-busy"
 
@@ -47,6 +52,11 @@ def plan_placement(free_vram: int, mem_available: int) -> dict:
     if free_vram < MIN_FREE_VRAM:
         raise GpuBusy(free_vram)
     return {0: free_vram - GPU_RESERVE, "cpu": max(mem_available - CPU_RESERVE, 0)}
+
+
+def worker_error_body(error: BaseException) -> dict:
+    """The worker's one error wire shape: a typed code (GpuBusy.code, else None) beside the text."""
+    return {"ok": False, "error": str(error), "code": getattr(error, "code", None), "traceback": traceback.format_exc()}
 
 
 def read_snapshot_revision(hf_home: Path, repo_id: str) -> str:
