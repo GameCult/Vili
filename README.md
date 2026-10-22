@@ -159,11 +159,25 @@ Kimodo normalizes the prompt before encoding (`A person shrugs sadly.`), and the
 cache keys on that text. A request's misses go to one transient child,
 `scripts/kimodo-text-encode.py`: it loads the encoder in bf16 on the GPU, with the
 layers that do not fit in free VRAM held in RAM, encodes, writes its answer and
-exits, so the OS reclaims its RAM and VRAM. It refuses with a typed `gpu-busy`
-below 2 GiB of free VRAM and has no CPU fallback; hits never touch it. Each
+exits, so the OS reclaims its RAM and VRAM. It sizes its own placement from the free VRAM torch
+can see and refuses a placement below 2 GiB with a typed `gpu-busy` (source `placement`);
+it has no CPU fallback, and hits never touch it. Each
 `/motion/generate` job carries the encoder record (hits, misses, seconds, vector
 hashes) and the worker identity. `GET /health` shows the identity and the stored
 count.
+
+GPU tenancy. Raven's GPU is the household's first. The daemon (Windows, in the
+console session) samples, every 15 seconds, the full-screen state, the 3D engine's use and
+the host's free VRAM, as numbers only, through one hidden PowerShell child
+(`scripts/gpu-tenancy-probe.ps1`). A new `POST /motion/generate` is refused with HTTP 503,
+`retry-after: 60` and `{ ok: false, code: "gpu-busy", source: "admission", gpu }` while the GPU
+is in use, and the consumer owns the retry. The GPU counts as in use at boot, on any full-screen
+sample, on free VRAM under 10 GiB, or on 3D use above 20% for two samples in a row, and it
+counts as free only after every sample for 3 minutes is clear. A job already running finishes;
+the gate never stops work. `operator_state.gpu` is `{ inUse, since, checkedAt, probeOk }`; it
+never names a program, and a probe that goes silent reads as in use with `probeOk` false.
+`VILI_GPU_SAMPLE_MS`, `VILI_GPU_CLEAR_HOLD_MS`, `VILI_GPU_MIN_FREE_MIB` and
+`VILI_GPU_UTIL3D_BUSY_PCT` override the thresholds. `npm test` runs the gate's tests.
 
 Measured on Raven on `2026-10-22`, for a 2 second clip at 20 diffusion steps:
 the worker is healthy 29 seconds after `docker rm` (was 179) and rests at 2.3 GiB

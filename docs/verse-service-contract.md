@@ -45,7 +45,13 @@ promoted from JSON once that request/receipt shape stabilizes.
 `POST /motion/generate` accepts an explicit animation request and forwards the
 supported Kimodo generation controls to the resident worker. Vili owns job
 identity, request persistence, worker lifecycle, timeout handling, and the
-artifact stem. Kimodo owns synthesis and model-specific export.
+artifact stem. Kimodo owns synthesis and model-specific export. Vili also owns GPU
+tenancy admission: while Raven's GPU is in use by the household, `POST /motion/generate`
+answers HTTP 503 with `retry-after: 60` and `{ "ok": false, "code": "gpu-busy", "source":
+"admission" | "placement", "gpu": { inUse, since, checkedAt, probeOk }, "jobId"? }`
+(`jobId` only for `placement`, where the job file was written). The `code` field is the
+only carrier; a consumer retries after `retry-after` and never matches error text. A job
+already running finishes.
 
 ```json
 {
