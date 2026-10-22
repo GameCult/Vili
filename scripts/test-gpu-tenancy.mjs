@@ -85,6 +85,13 @@ test("sustained 3D, immediate full-screen and VRAM", () => {
   edge.feed({ ...CLEAR, util3d: 20 });
   edge.feed({ ...CLEAR, util3d: 20 });
   assert.equal(edge.gate.status().inUse, false, "exactly the threshold is not above it");
+  edge.feed({ ...CLEAR, util3d: 80 });
+  edge.feed({ ...CLEAR, util3d: 20 });
+  assert.equal(edge.gate.status().inUse, false, "high then exactly the threshold");
+  const edgeUp = freeRig();
+  edgeUp.feed({ ...CLEAR, util3d: 20 });
+  edgeUp.feed({ ...CLEAR, util3d: 80 });
+  assert.equal(edgeUp.gate.status().inUse, false, "exactly the threshold then high");
 
   for (const [name, sample] of [
     ["QUNS_BUSY", { ...CLEAR, quns: 2 }],
@@ -138,6 +145,13 @@ test("start and stale fail closed", () => {
   assert.equal(r.gate.status().inUse, true);
   r.feed(CLEAR);
   assert.equal(r.gate.status().inUse, false);
+});
+
+test("a stale start keeps since at the start when samples resume busy", () => {
+  const r = rig();
+  r.advance(60 * SEC);
+  r.feed({ ...CLEAR, quns: 3 }, 0);
+  assert.deepEqual(r.gate.status(), { inUse: true, since: r.t0, checkedAt: r.at(), probeOk: true });
 });
 
 test("a gate that never hears from its probe stays in use and not ok", () => {
@@ -225,7 +239,7 @@ function fakeSpawn() {
   const spawn = (command, args, options) => {
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
-    child.stdout.setEncoding = () => {};
+    child.stdout.setEncoding = (encoding) => { child.encoding = encoding; };
     spawned.push({ command, args, options, child });
     return child;
   };
@@ -241,8 +255,11 @@ test("probe: one hidden child, lines become samples, junk is dropped", () => {
   assert.equal(command, "powershell.exe");
   assert.equal(options.windowsHide, true);
   assert.deepEqual(options.stdio, ["ignore", "pipe", "ignore"]);
-  assert.deepEqual(args.slice(args.indexOf("-ParentPid")), ["-ParentPid", "4242", "-IntervalMs", "15000"]);
-  assert.ok(args.includes("-File") && args.includes("gpu-tenancy-probe.ps1"));
+  assert.deepEqual(args, [
+    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+    "-File", "gpu-tenancy-probe.ps1", "-ParentPid", "4242", "-IntervalMs", "15000",
+  ]);
+  assert.equal(child.encoding, "utf8");
 
   child.stdout.emit("data", '{"quns":1,"freeMiB":14000,"util3d":2}\n{"quns":2,"free');
   child.stdout.emit("data", 'MiB":9000,"util3d":3}\r\ngarbage\n');
@@ -259,11 +276,27 @@ test("probe: respawns at most once per interval after the child exits", async ()
   spawned[0].child.emit("exit", 1);
   spawned[0].child.emit("error", new Error("again"));
   spawned[0].child.emit("exit", 1);
-  assert.equal(spawned.length, 1, "no immediate respawn");
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(spawned.length, 1, "no respawn inside the interval");
+  await new Promise((resolve) => setTimeout(resolve, 170));
   assert.equal(spawned.length, 2, "one respawn for one death, however many events");
   probe.stop();
   spawned[1].child.emit("exit", 1);
   await new Promise((resolve) => setTimeout(resolve, 200));
   assert.equal(spawned.length, 2, "a stopped probe does not respawn");
+});
+
+test("probe: a plain exit and a spawn error each respawn", async () => {
+  const exited = fakeSpawn();
+  const a = startProbe({ spawn: exited.spawn, scriptPath: "p.ps1", intervalMs: 20, onSample: () => {} });
+  exited.spawned[0].child.emit("exit", 0);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.equal(exited.spawned.length, 2);
+  a.stop();
+  const failed = fakeSpawn();
+  const b = startProbe({ spawn: failed.spawn, scriptPath: "p.ps1", intervalMs: 20, onSample: () => {} });
+  failed.spawned[0].child.emit("error", new Error("ENOENT"));
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.equal(failed.spawned.length, 2);
+  b.stop();
 });
