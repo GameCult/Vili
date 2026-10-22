@@ -166,25 +166,9 @@ it has no CPU fallback, and hits never touch it. Each
 hashes) and the worker identity. `GET /health` shows the identity and the stored
 count.
 
-GPU tenancy. Raven's GPU is the household's first. The daemon (Windows, in the
-console session) samples, every 15 seconds, the full-screen state, the 3D engine's use and
-the host's free VRAM, as numbers only, through one hidden PowerShell child
-(`scripts/gpu-tenancy-probe.ps1`, supervised by `scripts/gpu-probe.mjs`: a child that exits or
-sends nothing for 3 intervals is replaced). The daemon holds one GPU slot, and a
-`POST /motion/generate` is judged when it reaches the slot. It is refused with HTTP 503,
-`retry-after: 60` and `{ ok: false, code: "gpu-busy", source: "admission", gpu }` while the
-household is using the GPU, or `{ ok: false, code: "gpu-busy", source: "slot" }` while another job
-holds the slot; nothing queues, and the consumer owns the retry. The GPU counts as in use at
-boot, on any full-screen sample, on free VRAM under 10 GiB, or on 3D use above 20% for two
-samples in a row, and it counts as free only after every sample for 3 minutes is clear. Vili's own
-job takes most of the VRAM, so while a job holds the slot, and until the free VRAM has recovered to
-within 1 GiB of what it was before the job (at most 60 seconds), low free VRAM is not counted
-against the household; full-screen and 3D use always count. A job already running finishes; the
-gate never stops work. `operator_state.gpu` is `{ inUse, since, checkedAt, probeOk }`; it never
-names a program, and a probe that goes silent, or finds no 3D engine counters, reads as in use
-with `probeOk` false. `VILI_GPU_SAMPLE_MS`, `VILI_GPU_CLEAR_HOLD_MS`, `VILI_GPU_MIN_FREE_MIB` and
-`VILI_GPU_UTIL3D_BUSY_PCT` override the thresholds; a value that is not a finite number refuses
-to start the daemon. `npm test` runs the gate's tests.
+GPU tenancy. The daemon holds one GPU slot; a `POST /motion/generate` while another job holds it
+is refused with HTTP 503, `retry-after: 60` and `{ ok: false, code: "gpu-busy", source: "slot" }`.
+A job already running finishes; the gate never stops work. `npm test` runs the gate's tests.
 
 Measured on Raven on `2026-10-22`, for a 2 second clip at 20 diffusion steps:
 the worker is healthy 29 seconds after `docker rm` (was 179) and rests at 2.3 GiB

@@ -4,9 +4,8 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { WebSocketServer } from "ws";
-import { startProbe } from "./gpu-probe.mjs";
 import { RETRY_AFTER_SECONDS, admitThen, createGpuTenancy, gpuTenancyOptionsFromEnv, placementRefusal } from "./gpu-tenancy.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -139,7 +138,7 @@ function parseArgs(argv) {
 const args = parseArgs(process.argv.slice(2));
 const startedAt = new Date().toISOString();
 const gpuOptions = gpuTenancyOptionsFromEnv(process.env);
-const gpuTenancy = createGpuTenancy({ now: Date.now, ...gpuOptions });
+const gpuTenancy = createGpuTenancy(gpuOptions);
 let backendStatus = {
   checkedAt: null,
   dockerImage: "unknown",
@@ -764,13 +763,4 @@ if (args.health) {
   });
 
   setInterval(() => persistSurfaces().catch((error) => console.error(error)), 5000);
-
-  if (process.platform === "win32") {
-    startProbe({
-      spawn,
-      scriptPath: path.join(__dirname, "gpu-tenancy-probe.ps1"),
-      intervalMs: gpuOptions.sampleIntervalMs ?? 15000,
-      onSample: (sample) => gpuTenancy.observe(sample),
-    });
-  }
 }
