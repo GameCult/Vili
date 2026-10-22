@@ -17,7 +17,7 @@ first backend is Kimodo on Raven, running through Docker Engine inside
 - Future renderers own retargeting, playback, facial performance, camera, and
   lip sync.
 - Odin discovers Vili; Odin does not own Vili's state.
-- Vili is kept alive by its scheduled task on Raven today; Idunn would not own animation decisions.
+- Vili is started at boot by its scheduled task on Raven today; nothing restarts it after a crash, and Idunn does not manage it until its admission is ruled (deferred until RPS has its clips). Idunn would not own animation decisions.
 
 ## Local Runtime
 
