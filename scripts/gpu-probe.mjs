@@ -34,7 +34,7 @@ export function startProbe({ spawn, scriptPath, intervalMs, onSample, parentPid 
   function scheduleRespawn(entry) {
     if (entry.respawned) return;
     entry.respawned = true;
-    if (current === entry) current = null;
+    current = null;
     setTimeout(launch, Math.max(0, lastSpawnAt + intervalMs - Date.now())).unref();
   }
 
@@ -60,7 +60,7 @@ export function startProbe({ spawn, scriptPath, intervalMs, onSample, parentPid 
       const lines = pending.split("\n");
       pending = lines.pop();
       for (const line of lines) {
-        const sample = parseSample(line.trim());
+        const sample = parseSample(line);
         if (sample) {
           lastSampleAt = Date.now();
           onSample(sample);
@@ -72,7 +72,7 @@ export function startProbe({ spawn, scriptPath, intervalMs, onSample, parentPid 
   }
 
   const watchdog = setInterval(() => {
-    if (stopped || current === null || Date.now() - lastSampleAt <= staleIntervals * intervalMs) return;
+    if (current === null || Date.now() - lastSampleAt <= staleIntervals * intervalMs) return;
     const hung = current;
     scheduleRespawn(hung);
     hung.child.kill();

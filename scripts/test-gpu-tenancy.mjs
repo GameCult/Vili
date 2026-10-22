@@ -270,8 +270,25 @@ test("own VRAM: the next request right after a job is admitted while the child's
     return "second";
   });
   assert.equal(second, "second");
+  r.feed({ ...CLEAR, freeMiB: 5000 });
+  assert.equal(r.gate.status().inUse, false, "the baseline survives back-to-back jobs: 5000 is not recovery from a 14000 start");
   r.feed(CLEAR);
-  assert.equal(r.gate.status().inUse, false, "the baseline survives back-to-back jobs, so recovery is judged against the first");
+  assert.equal(r.gate.status().inUse, false);
+  r.feed({ ...CLEAR, freeMiB: 5000 });
+  assert.equal(r.gate.status().inUse, true, "recovered, so low VRAM is the household's again");
+});
+
+test("slot: releasing twice does not restart the drain", () => {
+  const r = freeRig();
+  const slot = r.gate.acquire();
+  r.feed(OWN);
+  slot.release();
+  r.feed(OWN);
+  r.feed(OWN);
+  r.feed(OWN);
+  slot.release(); // a second release is nothing: it must not give the drain a fresh cap
+  r.feed(OWN);
+  assert.equal(r.gate.status().inUse, true, "60 s after the one release, the drain cap has passed");
 });
 
 test("own VRAM: low VRAM that outlives the drain is the household's, and refuses", async () => {
@@ -362,6 +379,8 @@ test("env overrides: a malformed value refuses to start and names the variable, 
       );
     }
   }
-  assert.throws(() => gpuTenancyOptionsFromEnv({ VILI_GPU_SAMPLE_MS: "0" }), /VILI_GPU_SAMPLE_MS/, "a zero interval would spin the probe");
-  assert.doesNotThrow(() => gpuTenancyOptionsFromEnv({ VILI_GPU_CLEAR_HOLD_MS: "0" }));
+  assert.throws(() => gpuTenancyOptionsFromEnv({ VILI_GPU_SAMPLE_MS: "0" }), { message: "VILI_GPU_SAMPLE_MS must be a finite positive number" });
+  assert.throws(() => gpuTenancyOptionsFromEnv({ VILI_GPU_MIN_FREE_MIB: "x" }), { message: "VILI_GPU_MIN_FREE_MIB must be a finite non-negative number" });
+  assert.deepEqual(gpuTenancyOptionsFromEnv({ VILI_GPU_CLEAR_HOLD_MS: "0", VILI_GPU_MIN_FREE_MIB: "0", VILI_GPU_UTIL3D_BUSY_PCT: "0" }),
+    { clearHoldMs: 0, minFreeMiB: 0, util3dBusyPct: 0 }, "zero is a valid hold, minimum and threshold");
 });
