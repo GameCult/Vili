@@ -148,9 +148,27 @@ substrate does not disappear underneath the model. `GET /health` observes
 worker state without launching model load. `GET /smoke` verifies the backend
 and starts the resident worker when it is absent.
 
-Verified on `2026-06-12`: the resident worker loaded
-`Kimodo-SOMA-RP-v1.1` on Raven's RTX 4060 Ti in about 100 seconds. Five warmed
-service-path generations of a 1 second clip at 20 diffusion steps averaged
-about 54.4 seconds each, roughly `0.0184x` realtime. The old per-request
-`docker run --rm kimodo_gen` path measured about 195 seconds per 1 second clip
-and is no longer the generation authority.
+Kimodo's 8B text encoder (LLM2Vec, Llama 3) never lives in the worker. The
+worker answers Kimodo's encoder call from a CultCache store of float32 vectors,
+`.vili/embeddings/text-embeddings.cc` (`gamecult.vili.text_embedding.v0`, written
+through the cultcache-py checkout mounted from `E:\Projects\CultLib`). A vector's
+key is `sha256(encoderIdentity + newline + text)`, and the identity names the three
+Hugging Face snapshot revisions, bfloat16, the transformers and peft versions and
+the Kimodo commit, so a changed input misses instead of serving a stale vector.
+Kimodo normalizes the prompt before encoding (`A person shrugs sadly.`), and the
+cache keys on that text. A request's misses go to one transient child,
+`scripts/kimodo-text-encode.py`: it loads the encoder in bf16 on the GPU, with the
+layers that do not fit in free VRAM held in RAM, encodes, writes its answer and
+exits, so the OS reclaims its RAM and VRAM. It refuses with a typed `gpu-busy`
+below 2 GiB of free VRAM and has no CPU fallback; hits never touch it. Each
+`/motion/generate` job carries the encoder record (hits, misses, seconds, vector
+hashes) and the worker identity. `GET /health` shows the identity and the stored
+count.
+
+Measured on Raven on `2026-10-22`, for a 2 second clip at 20 diffusion steps:
+the worker is healthy 29 seconds after `docker rm` (was 179) and rests at 2.3 GiB
+resident (was 10.4 GiB, with 5.8 GB swapped). A cache miss takes 59 to 103
+seconds, the encode being nearly all of it (the 103 was with the model files cold
+in the page cache); the CPU encoder took 316 to 376. A hit takes under one
+second. The child peaks at 14.1 GiB of VRAM, so a miss needs almost the whole
+16 GB card.
