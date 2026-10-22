@@ -116,13 +116,13 @@ test("probe: respawns at most once per interval after the child exits", async ()
 
 test("probe: a plain exit and a spawn error each respawn", async () => {
   const exited = fakeSpawn();
-  const a = startProbe({ spawn: exited.spawn, scriptPath: "p.ps1", intervalMs: 20, onSample: () => {} });
+  const a = startProbe({ spawn: exited.spawn, scriptPath: "p.ps1", intervalMs: 20, onSample: () => {}, staleIntervals: 1000 });
   exited.spawned[0].child.emit("exit", 0);
   await sleep(120);
   assert.equal(exited.spawned.length, 2);
   a.stop();
   const failed = fakeSpawn();
-  const b = startProbe({ spawn: failed.spawn, scriptPath: "p.ps1", intervalMs: 20, onSample: () => {} });
+  const b = startProbe({ spawn: failed.spawn, scriptPath: "p.ps1", intervalMs: 20, onSample: () => {}, staleIntervals: 1000 });
   failed.spawned[0].child.emit("error", new Error("ENOENT"));
   await sleep(120);
   assert.equal(failed.spawned.length, 2);
@@ -135,7 +135,7 @@ test("probe watchdog: a child that stays alive but sends nothing is killed and r
   await sleep(90);
   assert.equal(spawned[0].child.kills, 0, "under 3 intervals of silence the child is left alone");
   assert.equal(spawned.length, 1);
-  await sleep(200);
+  await sleep(100);
   assert.equal(spawned[0].child.kills, 1, "the hung child is killed exactly once");
   assert.equal(spawned.length, 2, "and replaced");
   spawned[0].child.emit("exit", 1);
