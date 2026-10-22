@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { execFile, spawn } from "node:child_process";
 import { WebSocketServer } from "ws";
-import { RETRY_AFTER_SECONDS, admitThen, createGpuTenancy, placementRefusal, startProbe } from "./gpu-tenancy.mjs";
+import { startProbe } from "./gpu-probe.mjs";
+import { RETRY_AFTER_SECONDS, admitThen, createGpuTenancy, gpuTenancyOptionsFromEnv, placementRefusal } from "./gpu-tenancy.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -137,15 +138,8 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv.slice(2));
 const startedAt = new Date().toISOString();
-const envNumber = (name) => (process.env[name] === undefined ? undefined : Number(process.env[name]));
-const sampleIntervalMs = envNumber("VILI_GPU_SAMPLE_MS");
-const gpuTenancy = createGpuTenancy({
-  now: Date.now,
-  sampleIntervalMs,
-  clearHoldMs: envNumber("VILI_GPU_CLEAR_HOLD_MS"),
-  minFreeMiB: envNumber("VILI_GPU_MIN_FREE_MIB"),
-  util3dBusyPct: envNumber("VILI_GPU_UTIL3D_BUSY_PCT"),
-});
+const gpuOptions = gpuTenancyOptionsFromEnv(process.env);
+const gpuTenancy = createGpuTenancy({ now: Date.now, ...gpuOptions });
 let backendStatus = {
   checkedAt: null,
   dockerImage: "unknown",
@@ -670,7 +664,7 @@ async function runMotionJob(body, prompt, response) {
     await mkdir(path.join(args.stateRoot, "jobs"), { recursive: true });
     await writeFile(path.join(args.stateRoot, "jobs", `${jobId}.json`), JSON.stringify(job, null, 2));
   });
-  const placement = result.ok ? null : placementRefusal(result.body, gpuTenancy.status(), jobId);
+  const placement = result.ok ? null : placementRefusal(result.body, jobId);
   if (placement) json(response, 503, placement, { "retry-after": String(RETRY_AFTER_SECONDS) });
   else json(response, result.ok ? 200 : 502, job);
 }
@@ -775,7 +769,7 @@ if (args.health) {
     startProbe({
       spawn,
       scriptPath: path.join(__dirname, "gpu-tenancy-probe.ps1"),
-      intervalMs: sampleIntervalMs ?? 15000,
+      intervalMs: gpuOptions.sampleIntervalMs ?? 15000,
       onSample: (sample) => gpuTenancy.observe(sample),
     });
   }

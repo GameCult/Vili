@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
-import { admitThen, createGpuTenancy, parseSample, placementRefusal, startProbe } from "./gpu-tenancy.mjs";
+import { admitThen, createGpuTenancy, gpuTenancyOptionsFromEnv, placementRefusal } from "./gpu-tenancy.mjs";
 
 const SEC = 1000;
-const CLEAR = { quns: 1, freeMiB: 14000, util3d: 1 };
+const CLEAR = { quns: 1, freeMiB: 14000, util3d: 1, engines: 8 };
 
 function rig(options = {}) {
   let t = 1_000_000;
@@ -203,100 +202,166 @@ test("typed busy result", async () => {
   assert.equal(calls, 0);
 });
 
-test("placement refusal is keyed on the typed code, never on text", () => {
-  const gpu = { inUse: false, since: 1, checkedAt: 2, probeOk: true };
-  assert.deepEqual(placementRefusal({ ok: false, code: "gpu-busy", error: "x" }, gpu, "vili-1"), {
-    ok: false, code: "gpu-busy", source: "placement", gpu, jobId: "vili-1",
+test("placement refusal is keyed on the typed code, never on text, and carries no gate status", () => {
+  assert.deepEqual(placementRefusal({ ok: false, code: "gpu-busy", error: "x" }, "vili-1"), {
+    ok: false, code: "gpu-busy", source: "placement", jobId: "vili-1",
   });
-  assert.equal(placementRefusal({ ok: false, error: "gpu-busy: 0.50 GiB of VRAM free" }, gpu, "vili-1"), null);
-  assert.equal(placementRefusal({ ok: false, code: null }, gpu, "vili-1"), null);
-  assert.equal(placementRefusal(null, gpu, "vili-1"), null);
+  assert.equal(placementRefusal({ ok: false, error: "gpu-busy: 0.50 GiB of VRAM free" }, "vili-1"), null);
+  assert.equal(placementRefusal({ ok: false, code: null }, "vili-1"), null);
+  assert.equal(placementRefusal(null, "vili-1"), null);
 });
 
-test("no program name canary", () => {
-  const canary = "canary-vili-7f3a";
-  const line = JSON.stringify({ quns: 3, freeMiB: 2048, util3d: 55.5, name: canary, process: canary, instance: canary });
-  const sample = parseSample(line);
-  assert.deepEqual(sample, { quns: 3, freeMiB: 2048, util3d: 55.5 });
-  assert.deepEqual(Object.keys(sample).sort(), ["freeMiB", "quns", "util3d"]);
+
+// ---- the slot: one job at a time, judged where the GPU is taken ----
+
+const OWN = { ...CLEAR, freeMiB: 1800 }; // the encoder child holds the VRAM
+
+test("slot: a second request while a job runs is refused as a slot refusal and never waits", async () => {
+  const r = freeRig();
+  let release;
+  const running = admitThen(r.gate, () => new Promise((resolve) => { release = () => resolve("done"); }));
+  let calls = 0;
+  const refused = await admitThen(r.gate, async () => { calls += 1; });
+  assert.deepEqual(refused, { ok: false, code: "gpu-busy", source: "slot" });
+  assert.equal(calls, 0);
+  const third = await admitThen(r.gate, async () => { calls += 1; });
+  assert.equal(third.source, "slot");
+  release();
+  assert.equal(await running, "done");
+  assert.equal(await admitThen(r.gate, async () => "next"), "next", "the slot frees when the job ends");
+});
+
+test("slot: a failing job still frees the slot", async () => {
+  const r = freeRig();
+  await assert.rejects(admitThen(r.gate, async () => { throw new Error("boom"); }), /boom/);
+  assert.equal(await admitThen(r.gate, async () => "after"), "after");
+});
+
+test("slot: the household's answer comes before the slot's", async () => {
+  const r = freeRig();
+  const running = admitThen(r.gate, () => new Promise(() => {}));
+  r.feed({ ...OWN, quns: 3 });
+  const refused = await admitThen(r.gate, async () => {});
+  assert.equal(refused.source, "admission");
+  assert.equal(refused.gpu.inUse, true);
+  void running;
+});
+
+test("own VRAM: a sequential batch of misses is never refused for Vili's own load", async () => {
+  const r = freeRig();
+  for (let miss = 1; miss <= 8; miss += 1) {
+    const result = await admitThen(r.gate, async () => {
+      for (let i = 0; i < 9; i += 1) r.feed(OWN); // about 2 minutes of child VRAM
+      return `miss ${miss}`;
+    });
+    assert.equal(result, `miss ${miss}`, `miss ${miss} was admitted`);
+    r.feed(CLEAR); // the child's VRAM has drained
+    assert.equal(r.gate.status().inUse, false, `gate free after miss ${miss}`);
+  }
+});
+
+test("own VRAM: the next request right after a job is admitted while the child's VRAM drains", async () => {
+  const r = freeRig();
+  await admitThen(r.gate, async () => { r.feed(OWN); r.feed(OWN); });
+  r.feed(OWN); // still draining after the slot freed
+  assert.equal(r.gate.status().inUse, false);
+  const second = await admitThen(r.gate, async () => {
+    r.feed(OWN);
+    return "second";
+  });
+  assert.equal(second, "second");
+  r.feed(CLEAR);
+  assert.equal(r.gate.status().inUse, false, "the baseline survives back-to-back jobs, so recovery is judged against the first");
+});
+
+test("own VRAM: low VRAM that outlives the drain is the household's, and refuses", async () => {
+  const r = freeRig({ sampleIntervalMs: 15 * SEC });
+  await admitThen(r.gate, async () => { r.feed(OWN); });
+  for (let i = 0; i < 3; i += 1) {
+    r.feed(OWN);
+    assert.equal(r.gate.status().inUse, false, `draining ${i}`);
+  }
+  r.feed(OWN); // 60 s after the release: the drain cap
+  assert.equal(r.gate.status().inUse, true);
+  assert.equal((await admitThen(r.gate, async () => {})).source, "admission");
+});
+
+test("own VRAM: partial recovery within the tolerance ends the drain, below it does not", async () => {
+  const within = freeRig();
+  await admitThen(within.gate, async () => { within.feed(OWN); });
+  within.feed({ ...CLEAR, freeMiB: 14000 - 1024 });
+  within.feed({ ...CLEAR, freeMiB: 5000 });
+  assert.equal(within.gate.status().inUse, true, "recovered, then VRAM below the minimum counts again");
+
+  const below = freeRig();
+  await admitThen(below.gate, async () => { below.feed(OWN); });
+  below.feed({ ...CLEAR, freeMiB: 14000 - 1025 });
+  below.feed({ ...CLEAR, freeMiB: 5000 });
+  assert.equal(below.gate.status().inUse, false, "still draining: not recovered to within the tolerance");
+});
+
+test("household signals mid-job count, and the next job is refused", async () => {
+  for (const [name, sample] of [
+    ["full-screen", { ...OWN, quns: 2 }],
+    ["exclusive full-screen", { ...OWN, quns: 3 }],
+  ]) {
+    const r = freeRig();
+    await admitThen(r.gate, async () => {
+      r.feed(OWN);
+      r.feed(sample);
+    });
+    const refused = await admitThen(r.gate, async () => {});
+    assert.equal(refused.code, "gpu-busy", name);
+    assert.equal(refused.source, "admission", name);
+  }
+  const sustained = freeRig();
+  await admitThen(sustained.gate, async () => {
+    sustained.feed({ ...OWN, util3d: 90 });
+    sustained.feed({ ...OWN, util3d: 90 });
+  });
+  assert.equal((await admitThen(sustained.gate, async () => {})).source, "admission", "sustained 3D mid-job");
+});
+
+test("household VRAM that arrives mid-job is still there when the drain ends", async () => {
+  const r = freeRig();
+  await admitThen(r.gate, async () => { r.feed(OWN); });
+  for (let i = 0; i < 4; i += 1) r.feed({ ...OWN, freeMiB: 600 });
+  assert.equal(r.gate.status().inUse, true);
+  assert.equal((await admitThen(r.gate, async () => {})).source, "admission");
+});
+
+// ---- the sample that cannot see the 3D engine ----
+
+test("a sample with no resolved 3D counters is a probe fault, not a clear sample", () => {
   const r = rig();
-  r.gate.observe(sample);
-  assert.equal(JSON.stringify(r.gate.status()).includes(canary), false);
+  for (let i = 0; i < 20; i += 1) r.feed({ ...CLEAR, engines: 0 });
+  assert.deepEqual(r.gate.status(), { inUse: true, since: r.t0, checkedAt: null, probeOk: false });
+  r.feed({ ...CLEAR, engines: 1 });
+  assert.equal(r.gate.status().checkedAt, r.at(), "one resolved counter is enough");
 });
 
-test("parseSample drops anything that is not three finite numbers", () => {
-  assert.equal(parseSample("not json"), null);
-  assert.equal(parseSample("null"), null);
-  assert.equal(parseSample("[1,2,3]"), null);
-  assert.equal(parseSample(JSON.stringify({ quns: 1, freeMiB: 1 })), null);
-  assert.equal(parseSample(JSON.stringify({ quns: "1", freeMiB: 1, util3d: 1 })), null);
-  assert.equal(parseSample('{"quns":1,"freeMiB":1,"util3d":1e999}'), null);
-  assert.equal(parseSample(""), null);
+// ---- operator overrides ----
+
+test("env overrides: valid values are read, absent ones are left to the defaults", () => {
+  assert.deepEqual(gpuTenancyOptionsFromEnv({}), {});
+  assert.deepEqual(gpuTenancyOptionsFromEnv({
+    VILI_GPU_SAMPLE_MS: "5000",
+    VILI_GPU_CLEAR_HOLD_MS: "0",
+    VILI_GPU_MIN_FREE_MIB: "8192.5",
+    VILI_GPU_UTIL3D_BUSY_PCT: "35",
+  }), { sampleIntervalMs: 5000, clearHoldMs: 0, minFreeMiB: 8192.5, util3dBusyPct: 35 });
 });
 
-function fakeSpawn() {
-  const spawned = [];
-  const spawn = (command, args, options) => {
-    const child = new EventEmitter();
-    child.stdout = new EventEmitter();
-    child.stdout.setEncoding = (encoding) => { child.encoding = encoding; };
-    spawned.push({ command, args, options, child });
-    return child;
-  };
-  return { spawn, spawned };
-}
-
-test("probe: one hidden child, lines become samples, junk is dropped", () => {
-  const { spawn, spawned } = fakeSpawn();
-  const samples = [];
-  const probe = startProbe({ spawn, scriptPath: "gpu-tenancy-probe.ps1", intervalMs: 15000, onSample: (s) => samples.push(s), parentPid: 4242 });
-  assert.equal(spawned.length, 1);
-  const { command, args, options, child } = spawned[0];
-  assert.equal(command, "powershell.exe");
-  assert.equal(options.windowsHide, true);
-  assert.deepEqual(options.stdio, ["ignore", "pipe", "ignore"]);
-  assert.deepEqual(args, [
-    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-    "-File", "gpu-tenancy-probe.ps1", "-ParentPid", "4242", "-IntervalMs", "15000",
-  ]);
-  assert.equal(child.encoding, "utf8");
-
-  child.stdout.emit("data", '{"quns":1,"freeMiB":14000,"util3d":2}\n{"quns":2,"free');
-  child.stdout.emit("data", 'MiB":9000,"util3d":3}\r\ngarbage\n');
-  assert.deepEqual(samples, [
-    { quns: 1, freeMiB: 14000, util3d: 2 },
-    { quns: 2, freeMiB: 9000, util3d: 3 },
-  ]);
-  probe.stop();
-});
-
-test("probe: respawns at most once per interval after the child exits", async () => {
-  const { spawn, spawned } = fakeSpawn();
-  const probe = startProbe({ spawn, scriptPath: "p.ps1", intervalMs: 80, onSample: () => {} });
-  spawned[0].child.emit("exit", 1);
-  spawned[0].child.emit("error", new Error("again"));
-  spawned[0].child.emit("exit", 1);
-  await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.equal(spawned.length, 1, "no respawn inside the interval");
-  await new Promise((resolve) => setTimeout(resolve, 170));
-  assert.equal(spawned.length, 2, "one respawn for one death, however many events");
-  probe.stop();
-  spawned[1].child.emit("exit", 1);
-  await new Promise((resolve) => setTimeout(resolve, 200));
-  assert.equal(spawned.length, 2, "a stopped probe does not respawn");
-});
-
-test("probe: a plain exit and a spawn error each respawn", async () => {
-  const exited = fakeSpawn();
-  const a = startProbe({ spawn: exited.spawn, scriptPath: "p.ps1", intervalMs: 20, onSample: () => {} });
-  exited.spawned[0].child.emit("exit", 0);
-  await new Promise((resolve) => setTimeout(resolve, 120));
-  assert.equal(exited.spawned.length, 2);
-  a.stop();
-  const failed = fakeSpawn();
-  const b = startProbe({ spawn: failed.spawn, scriptPath: "p.ps1", intervalMs: 20, onSample: () => {} });
-  failed.spawned[0].child.emit("error", new Error("ENOENT"));
-  await new Promise((resolve) => setTimeout(resolve, 120));
-  assert.equal(failed.spawned.length, 2);
-  b.stop();
+test("env overrides: a malformed value refuses to start and names the variable, not the value", () => {
+  for (const name of ["VILI_GPU_SAMPLE_MS", "VILI_GPU_CLEAR_HOLD_MS", "VILI_GPU_MIN_FREE_MIB", "VILI_GPU_UTIL3D_BUSY_PCT"]) {
+    for (const bad of ["10240MiB", "", "  ", "NaN", "Infinity", "-5"]) {
+      assert.throws(
+        () => gpuTenancyOptionsFromEnv({ [name]: bad }),
+        (error) => error.message.includes(name) && (bad.trim() === "" || !error.message.includes(bad)),
+        `${name}=${JSON.stringify(bad)}`,
+      );
+    }
+  }
+  assert.throws(() => gpuTenancyOptionsFromEnv({ VILI_GPU_SAMPLE_MS: "0" }), /VILI_GPU_SAMPLE_MS/, "a zero interval would spin the probe");
+  assert.doesNotThrow(() => gpuTenancyOptionsFromEnv({ VILI_GPU_CLEAR_HOLD_MS: "0" }));
 });

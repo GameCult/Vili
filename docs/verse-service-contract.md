@@ -46,12 +46,15 @@ promoted from JSON once that request/receipt shape stabilizes.
 supported Kimodo generation controls to the resident worker. Vili owns job
 identity, request persistence, worker lifecycle, timeout handling, and the
 artifact stem. Kimodo owns synthesis and model-specific export. Vili also owns GPU
-tenancy admission: while Raven's GPU is in use by the household, `POST /motion/generate`
-answers HTTP 503 with `retry-after: 60` and `{ "ok": false, "code": "gpu-busy", "source":
-"admission" | "placement", "gpu": { inUse, since, checkedAt, probeOk }, "jobId"? }`
-(`jobId` only for `placement`, where the job file was written). The `code` field is the
-only carrier; a consumer retries after `retry-after` and never matches error text. A job
-already running finishes.
+tenancy admission: the daemon holds one GPU slot, and `POST /motion/generate` is judged
+when it reaches the slot. It answers HTTP 503 with `retry-after: 60` and one of three bodies, by
+`source`: `{ "ok": false, "code": "gpu-busy", "source": "admission", "gpu": { inUse, since,
+checkedAt, probeOk } }` while the household is using the GPU; `{ "ok": false, "code":
+"gpu-busy", "source": "slot" }` while another job holds the slot (nothing queues); and `{
+"ok": false, "code": "gpu-busy", "source": "placement", "jobId" }` when the encoder child
+refused its own placement, where the job file was written and no household status is
+claimed. The `code` field is the only carrier; a consumer retries after `retry-after` and
+never matches error text. A job already running finishes.
 
 ```json
 {

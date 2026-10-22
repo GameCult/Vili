@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node scripts/vili-daemon.mjs",
     "health": "node scripts/vili-daemon.mjs --health",
-    "test": "node --test scripts/test-gpu-tenancy.mjs",
+    "test": "node --test scripts/test-gpu-tenancy.mjs scripts/test-gpu-probe.mjs",
     "test:http": "node --test scripts/test-gpu-gate-http.mjs",
     "smoke": "node scripts/smoke-vili.mjs",
     "provider": "node scripts/vili-daemon.mjs --print-provider-advertisement"
