@@ -9,12 +9,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
 from types import SimpleNamespace
 
+import peft
 import torch
+import transformers
+from huggingface_hub.constants import HF_HOME
 
 from kimodo import DEFAULT_MODEL, load_model
 from kimodo.constraints import load_constraints_lst
 from kimodo.exports.motion_io import save_kimodo_npz
 from kimodo.meta import parse_prompts_from_meta
+from kimodo.model.load_model import TEXT_ENCODER_PRESETS
+from kimodo.model.loading import MODEL_NAMES
 from kimodo.model.registry import get_model_info
 from kimodo.scripts.generate import (
     _output_dir_and_path,
@@ -23,6 +28,8 @@ from kimodo.scripts.generate import (
     resolve_cfg_kwargs,
 )
 from kimodo.tools import save_json, seed_everything
+
+import text_encoding
 
 
 def parse_args():
@@ -37,12 +44,35 @@ args = parse_args()
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 started_at = time.time()
 model_load_started_at = time.time()
+preset = TEXT_ENCODER_PRESETS["llm2vec"]["kwargs"]
+kimodo_commit = os.environ["VILI_KIMODO_COMMIT"]
+kimodo_image = os.environ["VILI_KIMODO_IMAGE"]
+encoder_identity = text_encoding.encoder_identity(
+    revisions={
+        repo: text_encoding.read_snapshot_revision(HF_HOME, repo)
+        for repo in (preset["base_model_name_or_path"], preset["peft_model_name_or_path"], text_encoding.LLAMA_BASE)
+    },
+    dtype=preset["dtype"],
+    transformers_version=transformers.__version__,
+    peft_version=peft.__version__,
+    kimodo_commit=kimodo_commit,
+)
+# The 8B encoder never lives here: misses go to a one-shot child (kimodo-text-encode.py), hits come from the store.
+text_encoder = text_encoding.CachedTextEncoder(
+    text_encoding.open_store(os.path.join(os.environ.get("VILI_EMBEDDINGS_DIR", "/vili-embeddings"), "text-embeddings.cc")),
+    encoder_identity,
+    text_encoding.encode_misses_in_child,
+    device=device,
+)
 model, resolved_model = load_model(
     args.model,
     device=device,
     default_family="Kimodo",
     return_resolved_name=True,
+    text_encoder=text_encoder,
 )
+model_revision = text_encoding.read_snapshot_revision(HF_HOME, MODEL_NAMES[resolved_model])
+worker_identity = {"kimodoCommit": kimodo_commit, "imageId": kimodo_image, "modelRevision": model_revision}
 model_load_seconds = time.time() - model_load_started_at
 model_info = get_model_info(resolved_model)
 display_model = model_info.display_name if model_info else resolved_model
@@ -276,6 +306,7 @@ def generate(payload):
     started = time.time()
     with generation_lock:
         locked_at = time.time()
+        text_encoder.reset()
         output = model(
             texts,
             num_frames,
@@ -297,6 +328,13 @@ def generate(payload):
         if request_bool(payload, "saveExampleDir") or request_bool(payload, "save_example_dir"):
             files.extend(save_example_dirs(output_base, texts, num_frames, num_samples, constraints_path))
         generation_count += 1
+        encoder_record = {
+            "identity": encoder_identity,
+            "hits": text_encoder.hits,
+            "misses": text_encoder.misses,
+            "encodeSeconds": text_encoder.encode_seconds,
+            "embeddings": text_encoder.embeddings,
+        }
 
     finished = time.time()
     clip_seconds = sum(frame_count / model.fps for frame_count in num_frames)
@@ -315,6 +353,8 @@ def generate(payload):
         "constraints": constraints_path,
         "seed": seed,
         "files": files,
+        "encoder": encoder_record,
+        "worker": worker_identity,
         "timing": {
             "queueSeconds": locked_at - started,
             "generationSeconds": finished - locked_at,
@@ -341,6 +381,8 @@ class Handler(BaseHTTPRequestHandler):
             "uptimeSeconds": time.time() - started_at,
             "modelLoadSeconds": model_load_seconds,
             "generationCount": generation_count,
+            "encoder": {"identity": encoder_identity, "storedEmbeddings": text_encoder.count()},
+            "worker": worker_identity,
         })
 
     def do_POST(self):
