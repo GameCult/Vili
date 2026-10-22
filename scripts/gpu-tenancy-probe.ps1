@@ -8,8 +8,9 @@ while ($true) {
   try {
     $quns = 0
     if ([Vili.Shell]::SHQueryUserNotificationState([ref]$quns) -ne 0) { throw 'quns' }
-    $free = nvidia-smi.exe --query-gpu=memory.free --format=csv,noheader,nounits | Select-Object -First 1
+    $smi = @(nvidia-smi.exe --query-gpu=memory.free --format=csv,noheader,nounits)
     if ($LASTEXITCODE -ne 0) { throw 'smi' }
+    $free = $smi[0]
     $sum = (Get-Counter '\GPU Engine(*engtype_3D)\Utilization Percentage' -SampleInterval 1 -MaxSamples 1).CounterSamples | Measure-Object -Property CookedValue -Sum
     $line = [ordered]@{ quns = [int]$quns; freeMiB = [int]$free; util3d = [math]::Min(100, [math]::Round([double]$sum.Sum, 1)) } | ConvertTo-Json -Compress
     [Console]::Out.WriteLine($line)
