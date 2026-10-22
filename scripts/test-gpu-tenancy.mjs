@@ -41,12 +41,15 @@ test("hysteresis: busy holds for the clear window", () => {
   // a busy sample late in the hold restarts it
   r.feed({ ...CLEAR, quns: 2 });
   const restartAt = r.at();
-  for (let elapsed = 15; elapsed < 180; elapsed += 15) {
+  r.feed(CLEAR); // the hold counts from the first clear sample
+  const holdStart = r.at();
+  for (let elapsed = 15; elapsed <= 165; elapsed += 15) {
     r.feed(CLEAR);
-    assert.equal(r.gate.status().inUse, true, `restarted hold, ${elapsed} s`);
+    assert.equal(r.gate.status().inUse, true, `restarted hold, ${elapsed} s clear`);
   }
   r.feed(CLEAR);
-  assert.equal(r.at() - restartAt, 180 * SEC);
+  assert.equal(r.at() - holdStart, 180 * SEC);
+  assert.ok(r.at() > restartAt);
   const freedAt = r.at();
   assert.deepEqual(r.gate.status(), { inUse: false, since: freedAt, checkedAt: freedAt, probeOk: true });
   r.feed(CLEAR);
