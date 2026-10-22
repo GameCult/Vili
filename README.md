@@ -8,10 +8,10 @@ first backend is Kimodo on Raven, running through Docker Engine inside
 
 ## Front Door
 
-- **Value:** a warm, supervised path from a text prompt to generated body motion. Vili runs Kimodo as a resident GPU worker on Raven and returns motion artifacts (`motion.npz`, optional BVH) for a job, with Idunn health and an Eve operator surface.
+- **Value:** a warm, supervised path from a text prompt to generated body motion. Vili runs Kimodo as a resident GPU worker on Raven and returns motion artifacts (`motion.npz`, optional BVH) for a job.
 - **Problem:** Personas and games need generated motion, but cold per-request container runs took about 195 seconds per 1 second clip, versus about 54 warm. One daemon owns job identity, worker lifecycle and artifact references so callers do not touch Docker, WSL or model state.
 - **Entry points:** `scripts/vili-daemon.mjs` (the daemon; `npm start`, `npm run health`, `npm run smoke`, `npm run provider`), `scripts/kimodo-resident-worker.py` (the resident worker), `POST /motion/generate` (see Motion Generation), `docs/verse-service-contract.md` and `docs/motion-pipeline-target.md`.
-- **Live:** the resident Kimodo worker on Raven, `POST /motion/generate`, `GET /smoke`, the CultCache service store, and CultNet/RUDP health to Idunn. It has `motion.npz` and optional BVH output on the SOMA skeleton; there is no FBX export.
+- **Live:** the resident Kimodo worker on Raven, `POST /motion/generate`, `GET /smoke`, and the CultCache service store. It runs under a Raven scheduled task, not under Idunn. It has `motion.npz` and optional BVH output on the SOMA skeleton; there is no FBX export.
 - **Planned (target, 2026-10-20):** FBX animation export on the SOMA skeleton and a text-prompt-to-Unity-clip path with no hand steps, with each artifact recording prompt, constraints, seed and model. Retargeting stays with the consuming engine; see `docs/motion-pipeline-target.md`.
 
 ## Authority
