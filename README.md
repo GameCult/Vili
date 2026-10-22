@@ -166,9 +166,17 @@ it has no CPU fallback, and hits never touch it. Each
 hashes) and the worker identity. `GET /health` shows the identity and the stored
 count.
 
-GPU tenancy. The daemon holds one GPU slot; a `POST /motion/generate` while another job holds it
-is refused with HTTP 503, `retry-after: 60` and `{ ok: false, code: "gpu-busy", source: "slot" }`.
-A job already running finishes; the gate never stops work. `npm test` runs the gate's tests.
+GPU permission. Raven's GPU is the household's first. A tray icon in the household's session
+(`scripts/vili-gpu-tray.ps1`, logon task `GameCult\ViliTray`, installed by
+`scripts/install-vili-tray-task.ps1`) shows whether Vili may use the GPU and flips it with one click.
+The daemon owns the yes or no in `vili.service.cc` (`gamecult.vili.gpu_permission.v1`): off on a
+fresh install, set only from loopback (`POST /gpu-permission { allowed }`, read at
+`GET /gpu-permission`). A `POST /motion/generate` is refused with HTTP 503, `retry-after: 60` and
+`{ ok: false, code: "gpu-busy", source }` where `source` is `household` (the permission is off),
+`slot` (another job holds the one GPU slot) or `vram` (host `nvidia-smi.exe` free VRAM is below
+`VILI_GPU_MIN_FREE_MIB`, default 10240, or unreadable); nothing queues, and the consumer owns the
+retry. A job already running finishes; the gate never stops work. `operator_state.gpu` is
+`{ allowed, changedAt, jobRunning, lastRefusal }`. `npm test` runs the gate's tests.
 
 Measured on Raven on `2026-10-22`, for a 2 second clip at 20 diffusion steps:
 the worker is healthy 29 seconds after `docker rm` (was 179) and rests at 2.3 GiB

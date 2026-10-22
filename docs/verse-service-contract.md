@@ -46,15 +46,19 @@ promoted from JSON once that request/receipt shape stabilizes.
 supported Kimodo generation controls to the resident worker. Vili owns job
 identity, request persistence, worker lifecycle, timeout handling, and the
 artifact stem. Kimodo owns synthesis and model-specific export. Vili also owns GPU
-tenancy admission: the daemon holds one GPU slot, and `POST /motion/generate` is judged
-when it reaches the slot. It answers HTTP 503 with `retry-after: 60` and one of three bodies, by
-`source`: `{ "ok": false, "code": "gpu-busy", "source": "admission", "gpu": { inUse, since,
-checkedAt, probeOk } }` while the household is using the GPU; `{ "ok": false, "code":
-"gpu-busy", "source": "slot" }` while another job holds the slot (nothing queues); and `{
-"ok": false, "code": "gpu-busy", "source": "placement", "jobId" }` when the encoder child
-refused its own placement, where the job file was written and no household status is
-claimed. The `code` field is the only carrier; a consumer retries after `retry-after` and
-never matches error text. A job already running finishes.
+admission from the household's permission: the daemon holds one GPU slot, and `POST /motion/generate` is judged
+when it reaches the slot. It answers HTTP 503 with `retry-after: 60` and one of four bodies, by
+`source`: `{ "ok": false, "code": "gpu-busy", "source": "household", "gpu": { allowed: false,
+changedAt } }` while the household's permission is off; `{ "ok": false, "code": "gpu-busy",
+"source": "slot" }` while another job holds the slot (nothing queues); `{ "ok": false, "code":
+"gpu-busy", "source": "vram", freeMiB, minFreeMiB }` when host free VRAM is below the minimum or
+unreadable (`freeMiB` null); and `{ "ok": false, "code": "gpu-busy", "source": "placement",
+"jobId" }` when the encoder child refused its own placement, where the job file was written and no
+household status is claimed. `GET /gpu-permission` answers `{ allowed, changedAt, jobRunning,
+lastRefusal }` to anyone; `POST /gpu-permission { "allowed": boolean }` is the household's switch and
+answers 403 `{ "ok": false, "code": "household-only" }` to any caller that is not on the host's
+loopback. The `code` field is the only carrier; a consumer retries after `retry-after`, never sets
+the permission, and never matches error text. A job already running finishes.
 
 ```json
 {

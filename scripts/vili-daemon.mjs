@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { execFile } from "node:child_process";
 import { WebSocketServer } from "ws";
-import { RETRY_AFTER_SECONDS, admitThen, createGpuTenancy, gpuTenancyOptionsFromEnv, placementRefusal } from "./gpu-tenancy.mjs";
+import { RETRY_AFTER_SECONDS, admitThen, createGpuTenancy, gpuTenancyOptionsFromEnv, parseFreeMiB, placementRefusal } from "./gpu-tenancy.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -63,6 +63,19 @@ const operatorStateDefinition = defineDocumentType({
     { slot: 4, memberName: "gpu", typeName: "object" },
   ],
 });
+const gpuPermissionDefinition = defineDocumentType({
+  type: "gamecult.vili.gpu_permission",
+  schemaName: "gamecult.vili.gpu_permission",
+  schemaId: "gamecult.vili.gpu_permission.v1",
+  schemaVersion: "gamecult.vili.gpu_permission.v1",
+  name: (value) => value?.host || "raven",
+  schema: objectSchema,
+  members: [
+    { slot: 0, memberName: "host", typeName: "string", isName: true },
+    { slot: 1, memberName: "allowed", typeName: "boolean" },
+    { slot: 2, memberName: "changedAt", typeName: "string" },
+  ],
+});
 const eveSurfaceDefinition = defineDocumentType({
   type: "gamecult.eve.surface_state",
   schemaName: "gamecult.eve.surface_state",
@@ -110,6 +123,7 @@ const transportProfileDefinition = defineDocumentType({
 const viliDocumentRegistry = defineDocumentRegistry(
   providerAdvertisementDefinition,
   operatorStateDefinition,
+  gpuPermissionDefinition,
   eveSurfaceDefinition,
   commandBoundaryDefinition,
   transportProfileDefinition,
@@ -138,7 +152,23 @@ function parseArgs(argv) {
 const args = parseArgs(process.argv.slice(2));
 const startedAt = new Date().toISOString();
 const gpuOptions = gpuTenancyOptionsFromEnv(process.env);
-const gpuTenancy = createGpuTenancy(gpuOptions);
+// The daemon's one cache and store instance: every write to vili.service.cc goes through one queue.
+const viliCache = CultCache.builder()
+  .withRegistry(viliDocumentRegistry)
+  .withGenericStore(new SingleFileMessagePackBackingStore(path.join(args.stateRoot, viliStoreFileName)))
+  .build();
+let storedPermission;
+if (!args.health && !args.printProviderAdvertisement) {
+  await viliCache.pullAllBackingStores();
+  storedPermission = viliCache.get(gpuPermissionDefinition, "raven");
+}
+const gpuTenancy = createGpuTenancy({
+  now: Date.now,
+  ...gpuOptions,
+  permission: storedPermission,
+  savePermission: (value) => viliCache.put(gpuPermissionDefinition, "raven", { host: "raven", ...value }),
+  readFreeMiB: hostFreeMiB,
+});
 let backendStatus = {
   checkedAt: null,
   dockerImage: "unknown",
@@ -173,6 +203,11 @@ function run(command, commandArgs, options = {}) {
 
 function wsl(script, options = {}) {
   return run("wsl.exe", ["-d", "Ubuntu-24.04", "-u", "root", "--", "bash", "-lc", script], options);
+}
+
+async function hostFreeMiB() {
+  const r = await run("nvidia-smi.exe", ["--query-gpu=memory.free", "--format=csv,noheader,nounits"], { timeout: 5000 });
+  return r.ok ? parseFreeMiB(r.stdout) : null;
 }
 
 function shQuote(value) {
@@ -281,6 +316,7 @@ function operatorState() {
       deckProviders: "/eve/deck/providers",
       smoke: "/smoke",
       generate: "/motion/generate",
+      gpuPermission: "/gpu-permission",
     },
   };
 }
@@ -303,6 +339,11 @@ function commandBoundary() {
           "timeout handling",
           "motion artifact references",
         ],
+      },
+      gpuPermission: {
+        method: "POST",
+        path: "/gpu-permission",
+        owns: ["the household GPU permission for this host, from loopback only"],
       },
       smoke: {
         method: "GET",
@@ -383,15 +424,11 @@ async function persistSurfaces() {
 }
 
 async function persistCultCacheSurfaces() {
-  const cache = CultCache.builder()
-    .withRegistry(viliDocumentRegistry)
-    .withGenericStore(new SingleFileMessagePackBackingStore(path.join(args.stateRoot, viliStoreFileName)))
-    .build();
-  await cache.put(providerAdvertisementDefinition, providerId, providerAdvertisement());
-  await cache.put(operatorStateDefinition, "vili", operatorState());
-  await cache.put(eveSurfaceDefinition, providerId, eveSurface());
-  await cache.put(commandBoundaryDefinition, "vili", commandBoundary());
-  await cache.put(transportProfileDefinition, "vili", transportProfile());
+  await viliCache.put(providerAdvertisementDefinition, providerId, providerAdvertisement());
+  await viliCache.put(operatorStateDefinition, "vili", operatorState());
+  await viliCache.put(eveSurfaceDefinition, providerId, eveSurface());
+  await viliCache.put(commandBoundaryDefinition, "vili", commandBoundary());
+  await viliCache.put(transportProfileDefinition, "vili", transportProfile());
 }
 
 async function refreshBackendStatus({ includeKimodoHelp = false } = {}) {
@@ -506,6 +543,28 @@ async function readRequestBody(request) {
   for await (const chunk of request) chunks.push(chunk);
   const raw = Buffer.concat(chunks).toString("utf8");
   return raw ? JSON.parse(raw) : {};
+}
+
+const loopbackAddresses = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
+
+// The household's switch: only a caller on this machine (the tray, in the household's session) sets it.
+async function setGpuPermission(request, response) {
+  if (!loopbackAddresses.has(request.socket.remoteAddress)) {
+    json(response, 403, { ok: false, code: "household-only" });
+    return;
+  }
+  let body;
+  try {
+    body = await readRequestBody(request);
+  } catch (error) {
+    json(response, 400, { ok: false, error: `Invalid JSON: ${error.message}` });
+    return;
+  }
+  if (typeof body?.allowed !== "boolean") {
+    json(response, 400, { ok: false, error: "allowed must be a boolean." });
+    return;
+  }
+  json(response, 200, { ok: true, gpu: await gpuTenancy.setAllowed(body.allowed) });
 }
 
 async function generateMotion(request, response) {
@@ -704,6 +763,10 @@ async function handleRequest(request, response) {
     await refreshBackendStatus({ includeKimodoHelp: false });
     const ok = result.backendStatus.kimodoHelp === "ok" && worker.ok && worker.body?.ok;
     json(response, ok ? 200 : 502, { ok, ...result, worker: worker.body || worker });
+  } else if (url.pathname === "/gpu-permission" && request.method === "GET") {
+    json(response, 200, gpuTenancy.status());
+  } else if (url.pathname === "/gpu-permission" && request.method === "POST") {
+    await setGpuPermission(request, response);
   } else if (url.pathname === "/motion/generate" && request.method === "POST") {
     await generateMotion(request, response);
   } else {
