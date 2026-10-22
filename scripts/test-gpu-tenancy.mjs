@@ -23,16 +23,13 @@ function rig(options = {}) {
 
 function freeRig(options) {
   const r = rig(options);
-  r.feed(CLEAR);
-  r.advance(180 * SEC);
-  r.feed(CLEAR);
+  for (let i = 0; i < 13; i += 1) r.feed(CLEAR); // the 13th sample is 180 s after the first
   assert.equal(r.gate.status().inUse, false, "precondition: gate is free");
   return r;
 }
 
 test("hysteresis: busy holds for the clear window", () => {
-  const r = rig();
-  r.feed(CLEAR);
+  const r = freeRig();
   r.feed({ ...CLEAR, quns: 3 });
   const busyAt = r.at();
   assert.deepEqual(r.gate.status(), { inUse: true, since: busyAt, checkedAt: busyAt, probeOk: true });
@@ -118,9 +115,7 @@ test("thresholds from the options are honored", () => {
 test("start and stale fail closed", () => {
   const r = rig();
   assert.deepEqual(r.gate.status(), { inUse: true, since: r.t0, checkedAt: null, probeOk: true });
-  r.feed(CLEAR);
-  r.advance(180 * SEC);
-  r.feed(CLEAR);
+  for (let i = 0; i < 13; i += 1) r.feed(CLEAR);
   assert.equal(r.gate.status().inUse, false);
   const lastSample = r.at();
 
