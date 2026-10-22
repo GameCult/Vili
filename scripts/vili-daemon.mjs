@@ -4,8 +4,9 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { WebSocketServer } from "ws";
+import { RETRY_AFTER_SECONDS, admitThen, createGpuTenancy, placementRefusal, startProbe } from "./gpu-tenancy.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -59,6 +60,7 @@ const operatorStateDefinition = defineDocumentType({
     { slot: 1, memberName: "providerId", typeName: "string" },
     { slot: 2, memberName: "updatedAt", typeName: "string" },
     { slot: 3, memberName: "backend", typeName: "object" },
+    { slot: 4, memberName: "gpu", typeName: "object" },
   ],
 });
 const eveSurfaceDefinition = defineDocumentType({
@@ -135,6 +137,15 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv.slice(2));
 const startedAt = new Date().toISOString();
+const envNumber = (name) => (process.env[name] === undefined ? undefined : Number(process.env[name]));
+const sampleIntervalMs = envNumber("VILI_GPU_SAMPLE_MS");
+const gpuTenancy = createGpuTenancy({
+  now: Date.now,
+  sampleIntervalMs,
+  clearHoldMs: envNumber("VILI_GPU_CLEAR_HOLD_MS"),
+  minFreeMiB: envNumber("VILI_GPU_MIN_FREE_MIB"),
+  util3dBusyPct: envNumber("VILI_GPU_UTIL3D_BUSY_PCT"),
+});
 let backendStatus = {
   checkedAt: null,
   dockerImage: "unknown",
@@ -193,9 +204,10 @@ async function wslJson(script, options = {}) {
   }
 }
 
-function json(response, statusCode, body) {
+function json(response, statusCode, body, headers = {}) {
   const payload = JSON.stringify(body, null, 2);
   response.writeHead(statusCode, {
+    ...headers,
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
     "access-control-allow-origin": "*",
@@ -252,6 +264,7 @@ function operatorState() {
     startedAt,
     updatedAt: new Date().toISOString(),
     backend: backendStatus,
+    gpu: gpuTenancy.status(),
     authority: {
       owns: [
         "animation job intake",
@@ -526,6 +539,13 @@ async function generateMotion(request, response) {
     return;
   }
 
+  const admitted = await admitThen(gpuTenancy, () => runMotionJob(body, prompt, response));
+  if (admitted?.code === "gpu-busy") {
+    json(response, 503, admitted, { "retry-after": String(RETRY_AFTER_SECONDS) });
+  }
+}
+
+async function runMotionJob(body, prompt, response) {
   const jobId = `vili-${Date.now()}`;
   const artifactDir = path.join(args.stateRoot, "artifacts", jobId);
   await mkdir(artifactDir, { recursive: true });
@@ -650,7 +670,9 @@ async function generateMotion(request, response) {
     await mkdir(path.join(args.stateRoot, "jobs"), { recursive: true });
     await writeFile(path.join(args.stateRoot, "jobs", `${jobId}.json`), JSON.stringify(job, null, 2));
   });
-  json(response, result.ok ? 200 : 502, job);
+  const placement = result.ok ? null : placementRefusal(result.body, gpuTenancy.status(), jobId);
+  if (placement) json(response, 503, placement, { "retry-after": String(RETRY_AFTER_SECONDS) });
+  else json(response, result.ok ? 200 : 502, job);
 }
 
 async function handleRequest(request, response) {
@@ -748,4 +770,13 @@ if (args.health) {
   });
 
   setInterval(() => persistSurfaces().catch((error) => console.error(error)), 5000);
+
+  if (process.platform === "win32") {
+    startProbe({
+      spawn,
+      scriptPath: path.join(__dirname, "gpu-tenancy-probe.ps1"),
+      intervalMs: sampleIntervalMs ?? 15000,
+      onSample: (sample) => gpuTenancy.observe(sample),
+    });
+  }
 }
