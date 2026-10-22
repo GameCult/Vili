@@ -139,8 +139,7 @@ test("probe watchdog: a child that stays alive but sends nothing is killed and r
   assert.equal(spawned[0].child.kills, 1, "the hung child is killed exactly once");
   assert.equal(spawned.length, 2, "and replaced");
   spawned[0].child.emit("exit", 1);
-  const line = '{"quns":1,"freeMiB":14000,"util3d":1,"engines":4}
-';
+  const line = '{"quns":1,"freeMiB":14000,"util3d":1,"engines":4}\n';
   for (let i = 0; i < 4; i += 1) {
     await sleep(40);
     spawned[1].child.stdout.emit("data", line);
