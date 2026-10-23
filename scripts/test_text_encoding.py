@@ -180,6 +180,10 @@ class ThreadCap(unittest.TestCase):
         source = (Path(te.__file__).with_name("kimodo-text-encode.py")).read_text()
         self.assertLess(source.index("apply_thread_cap(os.environ)"), source.index("load_encoder(os.environ"))
 
+    def test_the_worker_applies_the_cap_before_it_loads_the_model(self):
+        source = (Path(te.__file__).with_name("kimodo-resident-worker.py")).read_text()
+        self.assertLess(source.index("text_encoding.apply_thread_cap(os.environ)"), source.index("model, resolved_model = load_model("))
+
 
 class ChildBoundary(unittest.TestCase):
     def run_stub(self, body, texts=("aa",)):
