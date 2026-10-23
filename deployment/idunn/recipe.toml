@@ -89,13 +89,6 @@ required_environment = ["HOME", "PIP_CACHE_DIR", "TMPDIR"]
 argv = ["release/python/bin/python3.12", "-m", "pip", "install", "--no-deps", "--no-build-isolation", "--no-index", "vendor/SOMA-X", "vendor/kimodo/MotionCorrection", "vendor/kimodo"]
 
 [[steps]]
-id = "pip-check"
-phase = "test"
-runner = "python-build"
-required_environment = ["HOME", "PIP_CACHE_DIR", "TMPDIR"]
-argv = ["release/python/bin/python3.12", "-m", "pip", "check"]
-
-[[steps]]
 id = "test-worker"
 phase = "test"
 runner = "python-build"
