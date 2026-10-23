@@ -302,9 +302,8 @@ const workerPidFile = () => path.join(args.stateRoot, "worker.pid");
 function killGroup(pgid, signal) {
   try {
     process.kill(-pgid, signal);
-    return true;
   } catch {
-    return false; // no such group
+    // no such group
   }
 }
 

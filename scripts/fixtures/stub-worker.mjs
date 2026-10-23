@@ -66,7 +66,7 @@ if (model === "hang-before-ready") {
         if (model === "slow-generate") return;
         if (model === "encoder") {
           // an encoder child of the real worker: a grandchild in the worker's group, then a request that never answers
-          const encoder = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+          const encoder = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore" });
           appendFileSync(spawnLog, `grandchild ${encoder.pid}\n`);
           return;
         }

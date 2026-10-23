@@ -379,37 +379,64 @@ test("a worker killed mid-request leaves no encoder child, and the next job has 
     const [worker] = daemon.spawns();
     assert.ok(isAlive(worker) && isAlive(grandchild));
     process.kill(worker, "SIGKILL");
+    assert.equal(readFileSync(path.join(daemon.stateRoot, "worker.pid"), "utf8"), `${worker}\n`);
     assert.equal((await pending).status, 502);
     await until(() => !isAlive(grandchild), "the encoder child to die with its worker");
+    await until(() => !existsSync(path.join(daemon.stateRoot, "worker.pid")), "the dead worker's pid file to go");
     assert.equal((await generate(daemon, { prompt: "y" })).status, 200);
     assert.equal(aliveWorkers(daemon).length, 1);
+    assert.equal(readFileSync(path.join(daemon.stateRoot, "worker.pid"), "utf8"), `${aliveWorkers(daemon)[0]}\n`);
     assert.equal(isAlive(grandchild), false);
   } finally {
     await daemon.stop();
   }
 });
 
-test("a restarted daemon kills the worker its crashed predecessor left, and runs exactly one", async () => {
+// "encoder" leaves a SIGTERM-proof grandchild beside the worker; "stubborn" is a worker that ignores SIGTERM; the plain stub is just a worker.
+for (const model of ["encoder", "stubborn", "stub-model"]) {
+  test(`a restarted daemon kills the ${model} worker its crashed predecessor left, and runs exactly one`, async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "vili-test-"));
+    const first = await startDaemon({ root });
+    const stray = generate(first, { prompt: "x", model }).catch(() => null);
+    await until(() => first.spawns().length, "the worker");
+    if (model === "encoder") await until(() => first.grandchildren().length, "the encoder child");
+    await until(() => request(first.port, "GET", "/health").then((r) => r.body?.state?.backend?.state === "ready"), "the worker to be ready");
+    const [worker] = first.spawns();
+    const strays = [worker, ...first.grandchildren()];
+    first.proc.kill("SIGKILL");
+    await until(() => first.proc.exitCode !== null || first.proc.signalCode !== null, "the first daemon to die");
+    await stray;
+    assert.ok(strays.every(isAlive), "the probe must reproduce the orphan before the fix can be measured");
+    const second = await startDaemon({ root });
+    try {
+      await until(() => !strays.some(isAlive), "the orphans to be killed");
+      assert.equal(existsSync(path.join(root, "worker.pid")), false);
+      assert.equal((await generate(second, { prompt: "y" })).status, 200);
+      assert.equal(aliveWorkers(second).length, 1);
+      second.proc.kill("SIGTERM");
+      await until(() => second.proc.exitCode !== null, "the second daemon to exit", 30);
+      assert.equal(aliveWorkers(second).length, 0);
+    } finally {
+      await second.stop();
+    }
+  });
+}
+
+test("a live worker outside the pid file's group is left alone", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "vili-test-"));
   const first = await startDaemon({ root });
-  const stray = generate(first, { prompt: "x", model: "encoder" }).catch(() => null);
-  const [grandchild] = await until(() => { const found = first.grandchildren(); return found.length ? found : null; }, "the encoder child");
-  const [worker] = first.spawns();
-  first.proc.kill("SIGKILL");
-  await until(() => first.proc.exitCode !== null || first.proc.signalCode !== null, "the first daemon to die");
-  await stray;
-  assert.ok(isAlive(worker) && isAlive(grandchild), "the probe must reproduce the orphan before the fix can be measured");
-  const second = await startDaemon({ root });
+  const bystander = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
   try {
-    await until(() => !isAlive(worker) && !isAlive(grandchild), "the orphans to be killed");
-    assert.equal(existsSync(path.join(root, "worker.pid")), false);
-    assert.equal((await generate(second, { prompt: "y" })).status, 200);
-    assert.equal(aliveWorkers(second).length, 1);
+    assert.equal((await generate(first)).status, 200);
+    const [worker] = first.spawns();
+    writeFileSync(path.join(root, "worker.pid"), `${bystander.pid}\n`);
+    const second = await startDaemon({ root });
+    assert.ok(isAlive(worker) && isAlive(bystander.pid), "only the group the pid file names, and only if it is ours, is killed");
     second.proc.kill("SIGTERM");
     await until(() => second.proc.exitCode !== null, "the second daemon to exit", 30);
-    assert.equal(aliveWorkers(second).length, 0);
   } finally {
-    await second.stop();
+    bystander.kill("SIGKILL");
+    await first.stop();
   }
 });
 
@@ -563,6 +590,7 @@ test("a missing interpreter fails the job at once", async () => {
     const backend = await backendOf(daemon);
     assert.equal(backend.state, "failed");
     assert.equal(backend.lastError, "the worker could not be spawned");
+    assert.equal(existsSync(path.join(daemon.stateRoot, "worker.pid")), false);
   } finally {
     await daemon.stop();
   }
