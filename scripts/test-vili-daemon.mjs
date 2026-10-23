@@ -2,7 +2,7 @@
 // Runs the real daemon against scripts/fixtures/stub-worker.mjs as its --python/--worker-entry.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -832,5 +832,60 @@ test("the hand-run daemon has no route challenge", async () => {
     assert.equal((await msgpackPost(daemon, snapshotRequest(), { origin: "https://evil.example" })).status, 404);
   } finally {
     await daemon.stop();
+  }
+});
+
+// ---- the Idunn entry's own rules: its argument contract, and what it derives for the daemon
+
+const entryPath = path.join(here, "idunn-entry.mjs");
+const runEntry = (args, env = {}) => new Promise((resolve) => {
+  const proc = spawn(process.execPath, [entryPath, ...args], { env: { PATH: process.env.PATH, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+  let output = "";
+  proc.stdout.on("data", (chunk) => { output += chunk; });
+  proc.stderr.on("data", (chunk) => { output += chunk; });
+  proc.on("exit", (code) => resolve({ code, output }));
+});
+
+test("the entry takes exactly --state-root <absolute> --kimodo-commit <40 hex>, and echoes none of a bad value", async () => {
+  const commit = "6bb58488037dd65360ff0c5d1692b403a23309f7";
+  const good = ["--state-root", "/var/lib/gamecult/vili", "--kimodo-commit", commit];
+  const bads = [
+    [],
+    [...good, "--extra", "x"],
+    ["--kimodo-commit", commit, "--state-root", "/var/lib/gamecult/vili"],
+    ["--state-root", "canary-relative-path", "--kimodo-commit", commit],
+    ["--state-root", "/var/lib/gamecult/vili", "--kimodo-commit", "canary-not-a-commit"],
+    ["--state-root", "/var/lib/gamecult/vili", "--kimodo-commit", commit.toUpperCase()],
+  ];
+  for (const args of bads) {
+    const answer = await runEntry(args, { GAMECULT_IDUNN_CANDIDATE_BIND: "127.0.0.1:18861" });
+    assert.equal(answer.code, 2, JSON.stringify(args));
+    assert.ok(!answer.output.includes("canary"), `the refusal repeated a value of ${JSON.stringify(args)}`);
+  }
+  const bind = await runEntry(good, { GAMECULT_IDUNN_CANDIDATE_BIND: "canary-not-a-bind" });
+  assert.equal(bind.code, 2);
+  assert.match(bind.output, /CANDIDATE_BIND is not host:port/);
+  assert.ok(!bind.output.includes("canary"));
+});
+
+test("the entry derives the daemon's host, port, interpreter and environment identity from the release", async () => {
+  const { createHash } = await import("node:crypto");
+  const { daemonEnvironment } = await import("./idunn-entry.mjs");
+  const release = mkdtempSync(path.join(os.tmpdir(), "vili-entry-"));
+  try {
+    mkdirSync(path.join(release, "vili", "scripts"), { recursive: true });
+    mkdirSync(path.join(release, "vili", "deployment", "idunn"), { recursive: true });
+    writeFileSync(path.join(release, "vili", "deployment", "idunn", "requirements-build.lock"), "build lock bytes\n");
+    writeFileSync(path.join(release, "vili", "deployment", "idunn", "requirements.lock"), "runtime lock bytes\n");
+    const entryDir = path.join(release, "vili", "scripts");
+    for (const bind of ["127.0.0.1:18861", "http://127.0.0.1:18861"]) {
+      const derived = daemonEnvironment(bind, entryDir);
+      assert.equal(derived.VILI_DAEMON_HOST, "127.0.0.1");
+      assert.equal(derived.VILI_DAEMON_PORT, "18861");
+      assert.equal(derived.VILI_PYTHON, path.join(release, "python", "bin", "python3.12"));
+      assert.equal(derived.VILI_PYTHON_ENV, `locks-sha256:${createHash("sha256").update("build lock bytes\nruntime lock bytes\n").digest("hex")}`);
+    }
+  } finally {
+    rmSync(release, { recursive: true, force: true });
   }
 });

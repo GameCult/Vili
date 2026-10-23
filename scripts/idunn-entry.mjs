@@ -94,15 +94,23 @@ function parseEntryArgs(argv) {
   if (!/^[0-9a-f]{40}$/u.test(argv[3])) fail("--kimodo-commit must be 40 lowercase hex characters");
 }
 
+// What the daemon reads from its environment, derived from Idunn's bind and the sealed release's own layout:
+// the interpreter sits beside the vili tree, and the environment's identity is the hash of the two lock files.
+export function daemonEnvironment(bind, entryDir) {
+  const { host, port } = splitBind(bind);
+  const locks = ["requirements-build.lock", "requirements.lock"].map((name) =>
+    readFileSync(path.resolve(entryDir, "..", "deployment", "idunn", name)));
+  return {
+    VILI_DAEMON_HOST: host,
+    VILI_DAEMON_PORT: port,
+    VILI_PYTHON: path.resolve(entryDir, "..", "..", "python", "bin", "python3.12"),
+    VILI_PYTHON_ENV: `locks-sha256:${createHash("sha256").update(Buffer.concat(locks)).digest("hex")}`,
+  };
+}
+
 async function main() {
   parseEntryArgs(process.argv.slice(2));
-  const { host, port } = splitBind(process.env.GAMECULT_IDUNN_CANDIDATE_BIND);
-  const locks = ["requirements-build.lock", "requirements.lock"].map((name) =>
-    readFileSync(path.resolve(here, "..", "deployment", "idunn", name)));
-  process.env.VILI_DAEMON_HOST = host;
-  process.env.VILI_DAEMON_PORT = port;
-  process.env.VILI_PYTHON = path.resolve(here, "..", "..", "python", "bin", "python3.12");
-  process.env.VILI_PYTHON_ENV = `locks-sha256:${createHash("sha256").update(Buffer.concat(locks)).digest("hex")}`;
+  Object.assign(process.env, daemonEnvironment(process.env.GAMECULT_IDUNN_CANDIDATE_BIND, here));
 
   const authority = loadIdunnRuntimeAuthorityFromEnvironment("vili", HEALTH_CONTRACT);
   const signer = createIdunnRuntimeSigner({
