@@ -57,7 +57,9 @@ unreadable (`freeMiB` null); and `{ "ok": false, "code": "gpu-busy", "source": "
 household status is claimed. `GET /gpu-permission` answers `{ allowed, changedAt, jobRunning,
 lastRefusal }` to anyone; `POST /gpu-permission { "allowed": boolean }` is the household's switch and
 answers 403 `{ "ok": false, "code": "household-only" }` to any caller that is not on the host's
-loopback. The `code` field is the only carrier; a consumer retries after `retry-after`, never sets
+loopback. Both POST routes require `Content-Type: application/json` and refuse a request whose
+`Origin` header is present and not the daemon's own loopback origin with 403 `{ "ok": false, "code":
+"cross-site" }`, so a web page cannot drive them; the daemon answers no CORS preflight. The `code` field is the only carrier; a consumer retries after `retry-after`, never sets
 the permission, and never matches error text. A job already running finishes.
 
 ```json
