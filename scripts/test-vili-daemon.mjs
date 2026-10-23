@@ -542,7 +542,7 @@ test("health, operator state and the unknown", async () => {
       assert.equal(answer.body.state.backend.threads, THREADS);
     }
     assert.equal((await request(daemon.port, "GET", "/motion/generate")).status, 404);
-    const unknown = await request(daemon.port, "GET", "/eve/operator");
+    const unknown = await request(daemon.port, "GET", "/provider-advertisement");
     assert.equal(unknown.status, 404);
     assert.equal(unknown.raw, "not found\n");
     const state = await operatorState(daemon);
