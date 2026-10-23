@@ -374,3 +374,44 @@ test("http: with the permission off nothing a web page or a LAN caller sends rea
   }
 });
 
+test("http: a client that hangs up mid-job does not free the slot", async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), "vili-gate-hangup-"));
+  const stubDir = await mkdtemp(path.join(os.tmpdir(), "vili-gate-stub-"));
+  const d = await stubbedDaemon(stubDir, stateRoot);
+  const prompt = { prompt: "a person waves hello, never seen before" };
+  const hangUp = new AbortController();
+  try {
+    await setPermission(d, { allowed: true });
+    const first = fetch(url(d, "/motion/generate"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(prompt),
+      signal: hangUp.signal,
+    }).catch((error) => error);
+    const deadline = Date.now() + 20000;
+    while (!existsSync(path.join(stubDir, "started"))) {
+      assert.ok(Date.now() < deadline, "the job never reached the worker");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    hangUp.abort();
+    assert.equal((await first).name, "AbortError", "the client hung up");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    assert.equal((await readPermission(d)).jobRunning, true, "the slot is still held after the hang-up");
+    const second = await generate(d, prompt);
+    assert.equal(second.status, 503);
+    assert.equal((await second.json()).source, "slot");
+    assert.equal(readFileSync(path.join(stubDir, "started"), "utf8"), "x", "no second job reached the worker");
+
+    await writeFile(path.join(stubDir, "release"), "");
+    const freed = Date.now() + 20000;
+    while ((await readPermission(d)).jobRunning) {
+      assert.ok(Date.now() < freed, "the slot never freed when the job ended");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  } finally {
+    await d.stop();
+    await rm(stateRoot, { recursive: true, force: true });
+    await rm(stubDir, { recursive: true, force: true });
+  }
+});
