@@ -158,7 +158,7 @@ It mounts:
 
 Inside the worker, Kimodo owns synthesis. Vili owns worker lifecycle,
 request/response persistence, timeout handling, and artifact references. Direct
-user requests, programmatic requests, and smoke-started warmup all use the same
+user requests and programmatic requests use the same
 resident worker health and generation path.
 
 Observed on `2026-06-12`: first worker model load took about 100 seconds. Once
@@ -169,5 +169,5 @@ resident, five 1 second / 20 step service-path generations averaged about
 
 Health checks must be cheap. They may verify process, port, backend metadata,
 and cached readiness, but they must not launch a Kimodo generation job or start
-model load. Smoke checks may start the resident worker because their purpose is
-backend readiness, not cheap liveness.
+model load. They change nothing: no GET route starts the worker, Docker or the GPU. Only a
+`POST /motion/generate` that holds the GPU slot starts the worker.

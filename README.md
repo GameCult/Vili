@@ -10,8 +10,8 @@ first backend is Kimodo on Raven, running through Docker Engine inside
 
 - **Value:** a warm, supervised path from a text prompt to generated body motion. Vili runs Kimodo as a resident GPU worker on Raven and returns motion artifacts (`motion.npz`, optional BVH) for a job.
 - **Problem:** Personas and games need generated motion, but cold per-request container runs took about 195 seconds per 1 second clip, versus about 54 warm. One daemon owns job identity, worker lifecycle and artifact references so callers do not touch Docker, WSL or model state.
-- **Entry points:** `scripts/vili-daemon.mjs` (the daemon; `npm start`, `npm run health`, `npm run smoke`, `npm run provider`), `scripts/kimodo-resident-worker.py` (the resident worker), `POST /motion/generate` (see Motion Generation), `docs/verse-service-contract.md` and `docs/motion-pipeline-target.md`.
-- **Live:** the resident Kimodo worker on Raven, `POST /motion/generate`, `GET /smoke`, and the CultCache service store. It runs under a Raven scheduled task, not under Idunn. It has `motion.npz` and optional BVH output on the SOMA skeleton; there is no FBX export.
+- **Entry points:** `scripts/vili-daemon.mjs` (the daemon; `npm start`, `npm run health`, `npm run provider`), `scripts/kimodo-resident-worker.py` (the resident worker), `POST /motion/generate` (see Motion Generation), `docs/verse-service-contract.md` and `docs/motion-pipeline-target.md`.
+- **Live:** the resident Kimodo worker on Raven, `POST /motion/generate`, and the CultCache service store. It runs under a Raven scheduled task, not under Idunn. It has `motion.npz` and optional BVH output on the SOMA skeleton; there is no FBX export.
 - **Planned (target, 2026-10-20):** FBX animation export on the SOMA skeleton and a text-prompt-to-Unity-clip path with no hand steps, with each artifact recording prompt, constraints, seed and model. Retargeting stays with the consuming engine; see `docs/motion-pipeline-target.md`.
 
 ## Authority
@@ -41,6 +41,11 @@ Default compatibility endpoint:
 http://10.77.0.4:8824
 ```
 
+The daemon listens only on the addresses `--host` names, comma-separated, one server each: on
+Raven `127.0.0.1` (the tray and `--health`) and `10.77.0.4` (the WireGuard peers: Starfire and
+the services that call `POST /motion/generate`). A wildcard such as `0.0.0.0` refuses to start.
+No response carries a CORS header, so a web page cannot read the daemon either; no browser
+caller exists.
 Vili is not an Idunn target today. Its lifecycle is the `GameCult\Vili`
 scheduled task on Raven, and `GET /health` is an operator lowering. Admission
 to Idunn is motion-pipeline:question:vili-under-idunn.
@@ -63,7 +68,6 @@ Important routes:
 - `GET /eve/operator`
 - `GET /eve/deck/providers`
 - `WS /eve/deck/vili.animation`
-- `GET /smoke`
 - `POST /motion/generate`
 
 ## Motion Generation
@@ -145,8 +149,8 @@ Vili keeps Kimodo warm through a resident worker container named
 the loaded model. Because Raven's Docker Engine runs inside WSL, Vili also
 keeps a tiny WSL sleep-loop alive while the worker is resident so the Docker
 substrate does not disappear underneath the model. `GET /health` observes
-worker state without launching model load. `GET /smoke` verifies the backend
-and starts the resident worker when it is absent.
+worker state without launching model load and without changing anything. Only a
+`POST /motion/generate` that holds the GPU slot starts the worker.
 
 Kimodo's 8B text encoder (LLM2Vec, Llama 3) never lives in the worker. The
 worker answers Kimodo's encoder call from a CultCache store of float32 vectors,
