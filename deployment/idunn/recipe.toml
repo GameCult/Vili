@@ -3,8 +3,8 @@ target = "vili"
 source_stamp_environment = "VILI_BUILD_COMMIT"
 required_gitlinks = ["vendor/CultLib", "vendor/kimodo", "vendor/SOMA-X"]
 
-# The one external input: a relocatable CPython. The locked site-packages are installed into this tree, never into
-# a venv (a venv's bin/python is an absolute link the seal refuses and its pyvenv.cfg names the build workspace).
+# The one external input: a relocatable CPython. The locked site-packages are installed into this tree itself: a copied
+# environment would carry an absolute interpreter link and a recorded build path, and the seal refuses both.
 [[external_inputs]]
 id = "cpython"
 url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.12.15+20261021-x86_64-unknown-linux-gnu-install_only.tar.gz"
