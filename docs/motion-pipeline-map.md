@@ -7,6 +7,86 @@ cuts not yet mapped. The target's rationale is `docs/motion-pipeline-target.md`.
 
 ## Body facts
 
+### Admission under Idunn, 2026-10-23
+
+Imagination (imagination-vili-admission, session sp-reentry-2026-10-21), for
+`motion-pipeline:cut_spec:cut-vili-admission.r1`. Read-only: `ssh ygg` with `sudo -n` for reads
+only, about 21:55 UTC; nothing started, stopped or changed there. Raven was not touched. Source
+reads are Vili `f2b35e3`, Idunn `d3222e5`, CultLib `b549d731`, StreamPixels `a213cc6`,
+gamecult-ops `a5d5fb1`.
+
+**Yggdrasil:**
+
+| Probe | Result |
+|---|---|
+| Disk | `/` (also `/srv`, `/var/lib`) 2.0 TB, 646 GB used, 1.3 TB free. `/var/lib/gamecult/idunn/staging` 37 GB, `/var/lib/gamecult/idunn/cache` 1.9 GB; release roots: StreamPixels 11 GB, Ghostlight v1 40 GB. |
+| Idunn body | Unit `idunn-yggdrasil.service`, `/usr/local/bin/idunn serve --bindings-dir /etc/gamecult/idunn/bindings ...`; the binary is dated 2026-10-20, so it predates `d3222e5` (merged 2026-10-23). No `version` subcommand. |
+| Bindings | ghostlight, heimdall, odin, raven-muninn, streampixels-service, streampixels-web. Every systemd target uses `strategy = "candidate-then-promote"`; only the Raven host actuator uses `stop-then-start`. Stable endpoints in use: 8831, 8832, 8833, 4100 (loopback), Odin `rudp://10.77.0.1:17871`. Private ranges in use: 18831-18839, 18841-18849, 18851-18859, 14101-14109, 17972-17979. |
+| Free ports | `ss -ltn` shows nothing on 8824, 8825 or 18860-18869. |
+| StreamPixels service binding (the precedent) | Runner `node-build`: `node:24.14.1-bookworm-slim@sha256:b506e7321f176aae77317f99d67a24b272c1f09f1d10f1761f2773447d8da26c`, user `65532:65532`, `allowed_programs = ["npm","node","corepack"]`, `network_profile = "bridge"`, cache `/var/lib/gamecult/idunn/cache/streampixels-node`. Workload: `state_group`, `release_root`, `state_root`, `runtime_root`, `network = "host-private"`, `hardening = "strict"`, `read_only_paths`. `[runtime_identity]`, `[route]` (`nginx-stream-tcp`), `[process_write_lease] record_path = <runtime_root>/process-write-lease.cc`, two distinct brake stores, `[rollout] retain_releases = 2`. |
+| Probe body | `~/scratch/vili-ygg-cpu/hf2` (18 GB) is an `HF_HOME`: `hf2/hub/models--{meta-llama--Meta-Llama-3-8B-Instruct, McGill-NLP--LLM2Vec-Meta-Llama-3-8B-Instruct-mntp, ...-mntp-supervised, nvidia--Kimodo-SOMA-RP-v1.1, nvidia--Kimodo-SOMA-RP-v1.2}`. Kimodo checkout `~/scratch/kimodo-cpp-probe/kimodo` at `6bb58488037dd65360ff0c5d1692b403a23309f7`, 79 MB without `.git`; `MotionCorrection/` (CMake, `setup.py`, `src/`, `python/`) is a subdirectory of that repo. Kimodo's `docker_requirements.txt` takes `py-soma-x @ git+https://github.com/NVlabs/SOMA-X.git` unpinned; the probe image's build log resolved it to `56a3d957a549c66425b500fddf7f3183bc6fbdff`. |
+| python-build-standalone | Upstream `SHA256SUMS` of release `20261021`: `cpython-3.12.15+20261021-x86_64-unknown-linux-gnu-install_only.tar.gz` is `5ff9f0602ce964a529ed1e8555d3abab6341926d724402ba9a15e9e877191124`. |
+
+**Idunn source at `d3222e5`:**
+
+- Recipe shape (`src/deployment.rs:36-129`): `external_inputs` are `{id, url, sha256, runner, destination}`;
+  an artifact has `executable` or `executable_members` (relative regular-file paths inside a
+  directory artifact), never both (`:919-927`). Destinations are single filenames and unique.
+- External inputs are fetched before any step, by `curl --proto =https` inside the named runner's
+  container, into that runner's workspace, and refused unless the sha256 matches
+  (`src/drivers.rs:2216-2275`, order `:2330-2390`). Each runner gets its own copy of the frozen
+  source; steps run in `docker run --read-only` with `/workspace` the only writable mount besides
+  `/cache`, and `/tmp` a `noexec` tmpfs (`src/drivers.rs:2078-2130`). The network is the binding's
+  `network_profile` (`none`, `bridge` or a named network, `:2049-2053`).
+- Seal (as merged, verdict `idunn-deploy-provenance:verdict:cut-tree-executable-members.s3`): files
+  0444 except `executable_members` at 0555; a link must be relative, with every `..` leading and no
+  more of them than the link's depth below the artifact top. The real PBS 3.12.15 + torch 2.5.1 +
+  Blender 5.2.2 tree sealed with all 1,128 links (300 terminfo `..` links among them). A
+  `python -m venv` on PBS makes `bin/python3.12` an absolute link, which the seal refuses (s2
+  claim on `vili-worker-venv-in-release`). The ignored test `big_tree_seals_from_env`
+  (`src/drivers.rs:14434`) seals a directory named by `IDUNN_BIG_TREE` holding `python/` and
+  `blender/`.
+- Readiness class (`src/control_plane.rs:691-747`): a routed target with no `odin.verse-rendezvous`
+  dependency is `RouteProof`, admitted by Idunn's own challenge with no Odin. A stateful
+  route-proof target is Ready when it answers the challenge `active` while holding the exact
+  lease (`:7895-7948`). The challenge is `POST /cultnet/snapshot` with
+  `Content-Type: application/msgpack` (`src/drivers.rs:719`, `:5982`).
+- Rollout (`docs/deployment-authority.md:245-300`): the candidate starts privately, proves
+  `warming`, the incumbent's writer is fenced and "must return a retryable unavailable result",
+  then the candidate gets its own write lease, then Ready, then the route, then the incumbent
+  drains.
+- State slot kinds are `cultcache-file`, `external-file` and `external-directory`; writers
+  `process-bound-single-writer` or `none`; recovery `preserve`, `rebuildable` or
+  `external-authority`; startup `create-or-open-after-write-lease` or `open-at-start`
+  (`src/deployment.rs:171-235`).
+- Idunn's own unit (`deploy/idunn-yggdrasil.service:66-106`) runs `ProtectSystem=full` and lists
+  each managed target's runtime, state and release roots in `ReadWritePaths`; a target missing
+  there fails at "creating runtime bundle" (`docs/migration.md`, host prerequisites).
+
+**The StreamPixels pattern, read:**
+
+- `deployment/idunn/runtime-presence.mjs:25-91` (StreamPixels): `loadIdunnRuntimeAuthorityFromEnvironment`,
+  `createIdunnRuntimeSigner`, then the write lease through its Odin publisher. The lease check is
+  local: `signer.assertWriteLease()` reads the lease record and needs no Odin (CultLib
+  `packages/cultnet-ts/src/idunn-odin-presence-publisher.ts:68-82`,
+  `idunn-runtime-authority.ts:100-121`).
+- `apps/service/src/app.ts:166-195`: `POST /cultnet/snapshot` decodes a msgpack
+  `cultnet.snapshot_request.v0` and answers `signer.answerRouteObservation(request)` as
+  `cultnet.snapshot_response_raw.v0`.
+- `gamecult-ops/runbooks/streampixels-idunn-v2.md:90-243`: root shapes (`state_root` `2770
+  root:<group>`, `runtime_root` `2750`, cache `0700` owned by the runner uid), identity enrolment
+  with `idunn-provision`, then `idunn validate --recipe --binding` before `idunn up`.
+- `gamecult-ops/idunn/yggdrasil/bindings/*.toml.in` are the checked-in bindings, rendered with the
+  provisioned signer id.
+
+**Vili at `f2b35e3`:** the daemon refuses every POST that is not `application/json` or carries an
+`Origin` (`scripts/vili-daemon.mjs:147-154`), so Idunn's msgpack challenge would get 403. It
+writes the state root before it listens (`:644-645`) and reclaims a predecessor's worker from
+`worker.pid` by a `/proc` scan (`:320-350`), which inside Idunn's `PrivatePIDs` sees only its
+own namespace. `--health` (`:630-642`) is an HTTP self-probe whose only caller was Raven's
+launcher. The child calls `sys.exit(main())` at import (`scripts/kimodo-text-encode.py:78`),
+so no test can import it.
+
 ### The move to Yggdrasil, 2026-10-23
 
 Imagination (imagination-vili-move, session sp-reentry-2026-10-21), for
@@ -109,8 +189,10 @@ Vili. `<models>` is `--models-root`, `/srv/vili/models` on Yggdrasil.
 | Motion job (`<state>/jobs/<jobId>.json`) | `vili-<epoch ms>` | written once when a job ends | the daemon |
 | Text embedding (`<state>/embeddings/text-embeddings.cc`) | `sha256(identity, text)`; the identity names assembly, device, dtype, the three repo revisions, torch, transformers, peft, accelerate, the Kimodo commit and the encoder child's own sha256 | appended on miss; a changed identity misses and leaves old rows inert | the worker's cache. Raven's file (assembly A on GPU) is not carried over |
 | Clip artifact (`<state>/artifacts/<jobId>/motion*.bvh`, `motion*.fbx`, `meta.json`) | the job id; `clipName` inside the FBX | written once per job; the BVH is the reproducibility unit, the FBX is derived | the daemon (export) from Kimodo's BVH; FBX planned by `cut-vili-fbx-export` |
-| Model weights (`<models>`, Hugging Face hub layout, with a sha256 manifest) | repo id and snapshot revision | provisioned by agents on the host; read-only to Vili; changed only by a new manifest | host provisioning; from the admission cut the worker refuses to start when the manifest does not match |
-| Worker environment (CPython 3.12 plus the locked site-packages) | the lock file's sha256 | rebuilt by the Idunn recipe on each release, sealed read-only | the recipe; question `motion-pipeline:question:worker-python-interpreter` decides where the interpreter comes from |
+| Model weights (`<models>` = `HF_HOME`, hub layout under `hub/`, with `SHA256SUMS` beside it) | repo id and snapshot revision | provisioned by agents on the host, checked once with `sha256sum -c` at provisioning; read-only to Vili (`read_only_paths`); changed only by a new manifest | host provisioning (runbook `gamecult-ops/runbooks/vili-idunn.md`); the worker's identity records the snapshot revisions it loaded |
+| Worker environment (`python/` in the release: PBS CPython 3.12.15 with the two hash-locked requirement files and Kimodo, MotionCorrection and SOMA-X installed into its own site-packages; no venv) | `cpython-3.12.15+20261021` plus the sha256 of the two lock files, computed by the Idunn entry from the sealed files | rebuilt by the recipe on each release, sealed 0444 with `bin/python3.12` the one 0555 member | the recipe (`worker-python-pbs-in-release`) |
+| Writer authority over `<state>` | under Idunn: the process write lease Idunn grants this incarnation; run by hand: `<state>/daemon.lock`, a Unix socket the live daemon listens on | lease: granted after the incumbent is fenced, checked every 5 s, lost on fence; lock: taken at start, refused while another daemon answers on it, reclaimed when stale | Idunn (lease); the daemon run by hand (lock). Nothing writes `<state>` before it holds one |
+| Worker pid file (`<state>/worker.pid`) | the worker's process group | written at spawn, removed at exit; read once at start to kill a crashed predecessor's worker | the hand-run daemon only. Under Idunn the unit's cgroup owns the tree and no pid file is written |
 | Vili service store (`<state>/vili.service.cc`) | `vili` | rewritten every 5 s with operator state, command boundary and transport profile | the daemon; no Eve surface or provider advertisement after `cut-vili-cpu-body` |
 | SOMA Humanoid table (StreamPixels `Assets/Editor/Motion/SomaHumanoid.cs`) | SOMA77 joint names to `HumanBodyBones` | changes only by code edit, then `ApplyToRest` rewrites the rest FBX's `.meta` | the engine; planned by `cut-soma-humanoid-avatar` |
 
@@ -164,24 +246,26 @@ its last bits, not which encoder made the vector. The embedding key names what m
 different encoder's (assembly, device, dtype, revisions, library versions, loader source); the
 thread count is recorded in the job's provenance.
 
-**Why the interpreter must travel, and what Idunn owes.** A venv points at its base interpreter
-by absolute path, and Yggdrasil's own Python is 3.13, which Kimodo's numpy pin cannot use. So the
-release carries a relocatable CPython 3.12 whose `bin/python3.12` must be executable. Idunn seals
-every file inside a tree artifact 0444 and allows only single-filename destinations, so today no
-recipe can ship it. That is follow-up `motion-pipeline:follow_up:idunn-tree-executable-members`.
-The admission cut waits on it; `cut-vili-cpu-body` does not.
+**Why the interpreter must travel, and how it does.** A venv points at its base interpreter by
+absolute path, and Yggdrasil's own Python is 3.13, which Kimodo's numpy pin cannot use. So the
+release carries python-build-standalone's relocatable CPython 3.12 with the locked packages
+installed into its own site-packages; there is no venv, so there is no absolute `bin/python`
+and no `pyvenv.cfg` naming the build workspace. Idunn `d3222e5` seals `bin/python3.12` 0555 as an
+executable member and keeps the tree's relative links.
 
 **Why the embedding cache starts empty.** Raven's file holds assembly A vectors made on the GPU.
 Under the complete identity none of them can ever hit, and carrying inert rows forward would only
 make the file lie about what it holds. A miss costs 55 s once per prompt.
 
-**Why Raven is retired at admission, not before.** The ruling says the old host decides nothing
-after the cut-over. `cut-vili-cpu-body` removes every Raven path from main, so no new Raven body
-can be made from main. The running Raven daemon is a detached checkout of the unmerged gate
-branch with no caller, and it is torn down in the same session that admits Vili on Yggdrasil, so
-Vili is never without a host while Idunn's contract is pending.
+**Why Raven is retired after admission, in its own cut.** The ruling says the old host decides
+nothing after the cut-over. `cut-vili-cpu-body` removes every Raven path from main, so no new
+Raven body can be made from main. The running Raven daemon is a detached checkout of the unmerged
+gate branch with no caller. It is torn down by its own cut, which cannot run until Vili is
+admitted under Idunn and answers on Yggdrasil end to end, so Vili is never without a host. Until
+then the Raven daemon stays as it is and nothing points at it; the admission cut never touches
+Raven (`raven-gpu-defers-to-household`).
 
-**What retires on Raven, in the admission session.** The `\GameCult\Vili` and `\GameCult\ViliTray`
+**What retires on Raven, in the teardown cut.** The `\GameCult\Vili` and `\GameCult\ViliTray`
 tasks are stopped and unregistered (PIDs 31324 and 4540 at probe time); the WSL keepalive loop is
 killed; container `vili-kimodo-worker`, image `gamecult/kimodo:latest`, image
 `nvidia/cuda:12.4.1-base-ubuntu22.04`, `/opt/gamecult/kimodo` and `/root/.cache/huggingface` (17 GB,
@@ -191,9 +275,11 @@ their sha256 recorded, then deleted with the `E:\Projects\Vili` checkout. `nvidi
 stays until its owner is proven. The `cut/raven-gpu-tenancy-gate` branch is not merged; its
 cross-site refusal is ported, the rest dies with it.
 
-**Rulings the move overturns, for Self to supersede.** `raven-gpu-tray-toggle`,
-`raven-gpu-defers-to-household`, `gpu-defer-refuse-typed`, `vili-idunn-deferred`,
-`encoder-transient-gpu` and `blender-body-portable` (its Windows zip on Raven). The gate spec
+**Rulings the move overturns.** `vili-idunn-deferred` was superseded by `vili-moves-to-yggdrasil-now`
+when the admission cut was mapped: its premise (a Raven host-actuator target, after RPS has
+clips) is gone. `raven-gpu-tray-toggle`, `raven-gpu-defers-to-household`, `gpu-defer-refuse-typed`,
+`encoder-transient-gpu` and `blender-body-portable` (its Windows zip on Raven) still govern the
+Raven daemon that runs until the teardown cut, and Self supersedes them with it. The gate spec
 `cut-raven-gpu-tenancy-gate.r2` is withdrawn, and the follow-ups `raven-gate-residue`,
 `raven-gpu-tenancy-gate` and `raven-host-ram-ceiling` are moot. `cut-vili-fbx-export.r2` and
 `cut-soma-humanoid-avatar.r2` were mapped against Raven; each gets a fresh revision after the
@@ -203,6 +289,67 @@ admission cut, not an edit now.
 advertisement are quarantined at tag `parked/vili-eve-surface` (`thing2:ruling:eve-dashboards-quarantined-2`,
 the Vili item of `thing2:follow_up:eve-quarantine-remainder`). They named `asgard.raven.vili`, so
 the move would have had to rewrite them anyway.
+
+### The admission
+
+**Readiness is route-proof, not Odin-correlated.** Idunn derives the readiness class from the
+recipe alone: a routed target with no `odin.verse-rendezvous` dependency is admitted by Idunn's
+own challenge and never reads Odin. Vili publishes nothing to Odin yet, and declaring the
+dependency only to reach readiness would make admission wait on a publisher that is a later cut.
+The daemon answers `POST /cultnet/snapshot` with `signer.answerRouteObservation`, as the
+StreamPixels service does, ahead of the cross-site refusal (the challenge is msgpack, never JSON)
+but still refusing any `Origin`.
+
+**One writer authority per way of running, decided by the entry.** Idunn's process write lease
+is the single-writer owner on Yggdrasil. The Idunn entry listens first (the candidate must answer
+the challenge `warming` before Idunn grants a lease), writes nothing, spawns nothing and answers
+`503 write-lease-pending` until `assertWriteLease` holds, then opens the state root and reports
+`active`. It re-checks the lease on the 5 s state tick; on loss (the incumbent fenced during a
+rollout) it stops its worker tree and answers `503 write-lease-lost`, which is the retryable
+unavailable result Idunn's rollout asks of a fenced incumbent. Run by hand (tests, development),
+the daemon takes `<state>/daemon.lock` instead, a Unix socket it listens on: a second daemon that
+can connect to it refuses to start and kills nothing, which closes the s2 case
+second-daemon-kills-live-worker. The two never stack: under Idunn a socket lock held by the
+fenced incumbent would block the candidate's start until the incumbent drained, which happens
+only after the candidate is Ready, a deadlock. The `/proc` reclaim of a crashed predecessor's
+worker belongs to the hand-run lock only, because under Idunn the unit's cgroup owns the tree and
+`PrivatePIDs` hides other incarnations.
+
+**Candidate-then-promote, not stop-then-start.** Every systemd target on Yggdrasil uses
+candidate-then-promote; stop-then-start runs only on the Raven host actuator, so it is unexercised
+for a routed systemd target. With the lease gate above, the overlap costs nothing: the candidate
+spawns no worker until it holds the lease and gets a job, and the fenced incumbent kills its own.
+The ephemeral worker port still matters, because both incarnations share the host network.
+
+**Kimodo and SOMA-X are gitlinks, not external inputs.** A gitlink pins content by commit, and
+Idunn already freezes `vendor/CultLib` that way with origins in the binding. A GitHub archive
+tarball has no byte-stability guarantee, so a sha256 pin on one can break with no upstream change.
+Kimodo's own requirements leave SOMA-X unpinned; the gitlink pins the commit the probe resolved.
+MotionCorrection is a directory of the Kimodo repo, so it comes with that gitlink. The
+interpreter is the one external input: astral publishes `SHA256SUMS`, and the operator approved
+that download (`worker-python-pbs-in-release`).
+
+**Two hash locks and no build isolation.** PBS 3.12 ships pip, and (unprobed, Hands confirms) not setuptools; Kimodo's
+pins likely include sdists (hydra's `antlr4-python3-runtime==4.9.3` is believed to be
+sdist-only on PyPI; unprobed, Hands confirms when locking) and MotionCorrection is a CMake build.
+pip does not hash-check an isolated build's own dependencies, so the build tools (setuptools,
+wheel, pybind11, cmake) come first from their own hash lock, and everything after builds with
+`--no-build-isolation`. The vendored directories cannot be hashed and install last with
+`--no-deps --no-index`. `TMPDIR` points into the runner's cache, because the container's `/tmp` is
+`noexec` and CMake's try-compile runs what it builds.
+
+**The weights manifest is checked at provisioning, not at worker start.** Hashing 18 GB on every
+worker start costs about a minute against a model load of seconds. The weights are root-owned and
+read-only to the unit, so after the one check at provisioning nothing Vili runs can change them.
+
+**`--health` is deleted.** It was an HTTP self-probe whose only caller was Raven's launcher. Under
+Idunn, health is signed presence; `GET /health` stays as a plain probe for agents.
+
+**Disk.** Each deploy attempt leaves about 7 GiB in staging and releases until
+`ghostlight-verse:follow_up:idunn-generation-retention` lands, so the cut's budget on `/` is
+60 GiB: the 18 GiB weights copy, up to four deploy attempts, the runner caches and the dry-run
+trees, which are removed when the dry run ends. Hands stops if free space on `/` falls below
+1.2 TB.
 
 ### Earlier decisions
 
@@ -230,25 +377,13 @@ the move would have had to rewrite them anyway.
 
 ## Cuts not yet mapped
 
-`cut-vili-cpu-body` is mapped (its spec is in the mind). After it, in order:
+`cut-vili-admission` is mapped (its spec is in the mind). After it, one line each:
 
-- **Vili admitted on Yggdrasil, Raven retired.** `deployment/idunn/vili.toml` (vendor/CultLib
-  gitlink, python-build runner, the interpreter and Kimodo, SOMA-X and MotionCorrection as
-  sha256-pinned `external_inputs`, a hash-locked `requirements.lock`, `.pyc` compiled
-  `--invalidation-mode unchecked-hash`), an `idunn-entry.mjs` answering
-  `gamecult.runtime_presence_health.v2` through `cultnet-ts/idunn-runtime`, the operator binding
-  and runtime identity, `/srv/vili/models` provisioned from `~/scratch/vili-ygg-cpu/hf2` with a
-  sha256 manifest, the state slots and write lease (jobs into CultCache here, or a line of its
-  own), then the Raven teardown above in the same session, and gamecult-ops `inventory.md`
-  repointed by its owner. Waits on `cut-vili-cpu-body`, on
-  `motion-pipeline:follow_up:idunn-tree-executable-members` and on
-  `motion-pipeline:question:worker-python-interpreter`.
+- **Raven teardown** (the list under "What retires on Raven"), and Self supersedes the Raven
+  rulings with it. Waits on admission verified end to end on Yggdrasil.
+- **`cut-vili-fbx-export` r3**, refreshed onto the Yggdrasil body (Linux Blender 5.2.2 in the
+  release as an executable member, no gate dependency). Waits on admission.
+- **`cut-soma-humanoid-avatar` r3**, sources taken from Yggdrasil instead of Raven. Waits on the
+  FBX cut.
+- **RPS slot clips** (`motion-pipeline:follow_up:rps-slot-clips-from-vili`). Waits on both r3 cuts.
 - **Vili publishes to Odin over CultMesh**, as StreamPixels' service does. Waits on admission.
-- **`cut-vili-fbx-export` r3**, re-mapped onto the Yggdrasil body: Linux Blender 5.2.2 in the
-  release under the same Idunn contract, no gate dependency, provenance from the new worker
-  identity. Waits on admission.
-- **`cut-soma-humanoid-avatar` r3**, sources copied from Yggdrasil instead of Raven. Waits on
-  the FBX cut.
-- **RPS beats through Vili** (`motion-pipeline:follow_up:rps-clips-from-vili`) on Yggdrasil, with
-  the countdown content `rps:ruling:countdown-clip-is-fist-into-palm` and
-  `rps:ruling:countdown-three-hits-reveal-on-third`. Waits on both r3 cuts.

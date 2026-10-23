@@ -11,10 +11,14 @@ consumer is the StreamPixels rock, paper, scissors duel
 (`rps:ruling:rps-motion-via-vili`). Stitched Mixamo clips are not specific enough
 for its countdown and throw.
 
-## Where the body stands (2026-10-20)
+## Where the body stands (2026-10-24)
 
-- **Vili runs on Raven.** Kimodo-SOMA-RP-v1.1 is a resident worker in Docker
-  inside WSL, on an RTX 4060 Ti with 16 GB.
+- **Vili is a Linux CPU process tree** (Vili main `f2b35e3`), verified on
+  Yggdrasil. It moves there under Idunn by `motion-pipeline:cut_spec:cut-vili-admission.r1`
+  (`motion-pipeline:ruling:vili-moves-to-yggdrasil-now`). Until that cut lands and
+  the Raven teardown follows, a retired Raven-era daemon still runs on Raven, with
+  its GPU permission off; Raven is the household's machine
+  (`motion-pipeline:ruling:raven-gpu-defers-to-household`).
 - **One request returns** `motion.npz` and optionally `motion.bvh`, on the SOMA
   77-joint skeleton, in centimetres. The skeleton has full hands, plus a
   synthetic `Root` above `Hips`.
