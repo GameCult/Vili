@@ -17,13 +17,16 @@ for Odin and Idunn. The request fields and the runtime flags are in `README.md`
 
 ## Witnesses
 
-- `.vili/vili.service.cc`: the daemon-owned CultCache store for operator state,
+- `.vili/vili.service.cc` (`/var/lib/gamecult/vili/vili.service.cc` under Idunn): the daemon-owned CultCache store for operator state,
   the command boundary and the transport profile.
 - `.vili/jobs/{jobId}.json`: accepted animation job records.
 - `.vili/artifacts/{jobId}/`: generated motion outputs when generation succeeds.
 - `.vili/embeddings/text-embeddings.cc`: the worker's text-embedding cache.
-- `.vili/worker.pid`: the process group of the running worker, so a restarted
-  daemon can find and kill a worker its crashed predecessor left behind.
+- `.vili/worker.pid`: the hand-run daemon's only: the process group of the running
+  worker, so a restarted hand-run daemon can find and kill a worker its crashed
+  predecessor left behind. Under Idunn it is never written; the unit's cgroup owns the tree.
+- `.vili/daemon.lock` (hand-run) and Idunn's process write lease (Yggdrasil): the
+  writer authority for the state root. No state is written before the lease is held.
 - `.vili/logs/worker.log`: the worker's stdout and stderr.
 
 ## Command Boundary

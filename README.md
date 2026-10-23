@@ -4,16 +4,16 @@ Vili is the GameCult Persona animation daemon.
 
 It owns the bridge from Persona performance intent to body-motion generation. Its
 backend is Kimodo, run by Vili's own daemon as a CPU-only Python process tree on
-Linux. Admission to Idunn on Yggdrasil is the next cut; until then nothing
-supervises Vili.
+Linux. On Yggdrasil it is the Idunn target `vili`, at `http://10.77.0.1:8824` over
+WireGuard.
 
 ## Front Door
 
 - **Value:** a supervised path from a text prompt to generated body motion. The daemon spawns one resident Kimodo worker, caps its threads, and returns motion artifacts (`motion.npz`, optional BVH) for a job.
 - **Problem:** Personas and games need generated motion, but cold per-request model loads cost minutes. One daemon owns job identity, worker lifecycle, the thread budget and artifact references, so callers touch no model state.
-- **Entry points:** `scripts/vili-daemon.mjs` (the daemon; `npm start`, `npm run health`, `npm test`), `scripts/kimodo-resident-worker.py` (the worker it spawns), `scripts/kimodo-text-encode.py` (the one-shot encoder child), `POST /motion/generate` (see Motion Generation), `docs/verse-service-contract.md` and `docs/motion-pipeline-target.md`.
-- **Live:** the process tree below, run by hand: `POST /motion/generate`, `GET /health`, `GET /operator-state`, and the CultCache service store. It produces `motion.npz` and optional BVH on the SOMA skeleton; there is no FBX export.
-- **Planned:** admission to Idunn on Yggdrasil with a locked virtual environment, then FBX export and a text-prompt-to-Unity-clip path with no hand steps (`docs/motion-pipeline-target.md`).
+- **Entry points:** `scripts/vili-daemon.mjs` (the daemon; `npm start`, `npm test`), `scripts/idunn-entry.mjs` (the process Idunn runs), `deployment/idunn/recipe.toml` (the sealed release), `gamecult-ops` `runbooks/vili-idunn.md` (provisioning and deploy), `scripts/kimodo-resident-worker.py` (the worker it spawns), `scripts/kimodo-text-encode.py` (the one-shot encoder child), `POST /motion/generate` (see Motion Generation), `docs/verse-service-contract.md` and `docs/motion-pipeline-target.md`.
+- **Live:** the process tree below, run by hand for development and tests, and as the Idunn target `vili` on Yggdrasil once its first `idunn up` lands: `POST /motion/generate`, `GET /health`, `GET /operator-state`, and the CultCache service store. It produces `motion.npz` and optional BVH on the SOMA skeleton; there is no FBX export.
+- **Planned:** FBX export and a text-prompt-to-Unity-clip path with no hand steps (`docs/motion-pipeline-target.md`).
 
 ## Authority
 
@@ -37,8 +37,8 @@ vili-daemon.mjs          job intake, worker lifecycle, thread cap, nice 10
     kimodo-text-encode.py     one child per request with cache misses, on CPU
 ```
 
-Setup: `git submodule update --init`; in `vendor/CultLib`, `npm ci --ignore-scripts` and
-`npm run build --workspace=packages/cultcache-ts`; then `npm ci` here. The worker
+Setup: `git submodule update --init` (CultLib, Kimodo, SOMA-X); in `vendor/CultLib`, `npm ci --ignore-scripts` and
+`npm run build --workspace=packages/cultcache-ts` and `--workspace=packages/cultnet-ts`; then `npm ci --install-links` here. The worker
 needs a Python environment with Kimodo's pins and Kimodo itself importable, and a
 Hugging Face cache (`<models root>/hub`) holding the Llama 3 base, both LLM2Vec
 adapters and the Kimodo checkpoint. Everything runs offline.
@@ -59,7 +59,13 @@ The daemon starts the worker on the first job, on a port the worker binds itself
 and reports in its ready line, and respawns it after an exit. The worker runs at
 nice 10 with `torch` limited to `--threads` (also `OMP_NUM_THREADS` and
 `MKL_NUM_THREADS`), so a shared host keeps its other services. Its log is
-`<state>/logs/worker.log`. The daemon owns the whole worker process group: it is killed when the worker exits for any reason, on SIGTERM or SIGINT, and at start-up if a crashed daemon left one (`<state>/worker.pid`). A service unit should also own the tree (systemd `KillMode=control-group`).
+`<state>/logs/worker.log`. The daemon owns the whole worker process group: it is killed when the worker exits for any reason, on SIGTERM or SIGINT, and, for a hand-run daemon, at start-up if a crashed predecessor left one (`<state>/worker.pid`). Under Idunn the unit's cgroup owns the tree.
+
+A hand-run daemon holds its state root through a Unix socket lock, `<state>/daemon.lock`: a second daemon on a live root prints that it is held and exits 2, killing nothing; a lock whose owner died is stale and is taken over.
+
+### On Yggdrasil
+
+Idunn runs `node vili/scripts/idunn-entry.mjs --state-root <root> --kimodo-commit <sha>` from a sealed release of three trees: `node`, `vili` (the daemon, worker, child, `node_modules`, cultcache-py) and `python` (python-build-standalone CPython 3.12 with the hash-locked packages, Kimodo, MotionCorrection and SOMA-X installed into it; no venv). The weights are the read-only cache `/srv/vili/models`; state is `/var/lib/gamecult/vili`. Idunn's process write lease is the one writer authority: until the daemon holds it, `POST /motion/generate` answers `503 write-lease-pending` and nothing is written; if the lease is lost the worker tree is killed and it answers `503 write-lease-lost`. Idunn proves readiness with its own `POST /cultnet/snapshot` challenge, answered with a signed runtime presence (an `Origin` is still refused).
 
 `POST /motion/generate` refuses any POST that carries an `Origin` or is not
 `application/json` with `403 cross-site`; no route answers a preflight.
@@ -68,7 +74,7 @@ Vili writes daemon-owned state to `.vili/vili.service.cc`: operator state, the
 command boundary and the transport profile. Jobs are `.vili/jobs/<jobId>.json`,
 artifacts `.vili/artifacts/<jobId>/`.
 
-Routes: `GET /health`, `GET /operator-state`, `POST /motion/generate`.
+Routes: `GET /health`, `GET /operator-state`, `POST /motion/generate`; under Idunn also `POST /cultnet/snapshot`, Idunn's route challenge.
 
 ## Motion Generation
 
