@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import http from "node:http";
 import os from "node:os";
-import { closeSync, openSync, writeSync } from "node:fs";
+import { closeSync, openSync, readdirSync, readFileSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline";
@@ -293,17 +293,69 @@ function waitForExit(proc, timeoutMs) {
   });
 }
 
-// The worker leads its own process group, so the encoder child it spawns dies with it.
+// The worker leads its own process group (its pid is the group id), so the encoder child it spawns is in the group
+// too. The daemon owns the whole group: it is killed when the worker exits for any reason, on a requested stop, and
+// at the next start if a crashed daemon left it behind (reclaimStrayWorker). Under systemd, KillMode=control-group
+// is the same ownership from outside the process.
+const workerPidFile = () => path.join(args.stateRoot, "worker.pid");
+
+function killGroup(pgid, signal) {
+  try {
+    process.kill(-pgid, signal);
+    return true;
+  } catch {
+    return false; // no such group
+  }
+}
+
+function forgetWorkerPid(pid) {
+  try {
+    if (readFileSync(workerPidFile(), "utf8").trim() === String(pid)) unlinkSync(workerPidFile());
+  } catch {
+    // no pid file, or another worker's
+  }
+}
+
+// A worker left by a crashed daemon: the pid file names its group, and the group is ours only if some member
+// still carries this state root's embeddings directory in its environment (the pid may have been reused).
+function reclaimStrayWorker() {
+  let pgid;
+  try {
+    pgid = Number(readFileSync(workerPidFile(), "utf8").trim());
+  } catch {
+    return;
+  }
+  const marker = `VILI_EMBEDDINGS_DIR=${path.join(args.stateRoot, "embeddings")}`;
+  let ours = false;
+  try {
+    for (const entry of readdirSync("/proc")) {
+      if (!/^\d+$/.test(entry)) continue;
+      try {
+        const stat = readFileSync(`/proc/${entry}/stat`, "utf8");
+        const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+        if (Number(fields[2]) !== pgid) continue;
+        if (readFileSync(`/proc/${entry}/environ`, "utf8").split("\0").includes(marker)) ours = true;
+      } catch {
+        // the process exited while we looked
+      }
+    }
+  } catch {
+    // no /proc: nothing can be verified, so nothing is killed
+  }
+  if (ours) killGroup(pgid, "SIGKILL");
+  try {
+    unlinkSync(workerPidFile());
+  } catch {
+    // already gone
+  }
+}
+
 async function stopWorker() {
   const proc = worker.proc;
   if (!proc || proc.pid === undefined) return;
   worker.state = "stopped";
   for (const signal of ["SIGTERM", "SIGKILL"]) {
-    try {
-      process.kill(-proc.pid, signal);
-    } catch {
-      // the group is already gone
-    }
+    killGroup(proc.pid, signal);
     if (await waitForExit(proc, signal === "SIGTERM" ? 10000 : 5000)) break;
   }
 }
@@ -322,6 +374,13 @@ async function startWorker(model, timeoutMs) {
     detached: true,
   });
   closeSync(logFd);
+  if (proc.pid !== undefined) {
+    writeFileSync(workerPidFile(), `${proc.pid}\n`);
+    proc.once("exit", () => {
+      killGroup(proc.pid, "SIGKILL"); // whatever the worker left running, an encoder child included
+      forgetWorkerPid(proc.pid);
+    });
+  }
   Object.assign(worker, { state: "starting", proc, pid: proc.pid ?? null, port: null, servedModels: [], lastError: null });
   const exited = new Promise((resolve) => {
     proc.once("error", () => resolve("the worker could not be spawned"));
@@ -596,6 +655,7 @@ if (args.health) {
   });
 
   server.listen(args.port, args.host, () => {
+    reclaimStrayWorker(); // synchronous: no request is served before a predecessor's worker is gone
     console.log(`Vili listening on http://${args.host}:${server.address().port}`);
   });
 

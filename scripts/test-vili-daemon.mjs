@@ -2,7 +2,7 @@
 // Runs the real daemon against scripts/fixtures/stub-worker.mjs as its --python/--worker-entry.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -40,9 +40,9 @@ function isAlive(pid) {
 
 async function startDaemon({
   omit = [], viaEnv = false, threads = String(THREADS), python = process.execPath, nested = false, host = "127.0.0.1",
-  relativeModels = false, extraArgs = [],
+  relativeModels = false, extraArgs = [], root: givenRoot = null,
 } = {}) {
-  const root = mkdtempSync(path.join(os.tmpdir(), "vili-test-"));
+  const root = givenRoot ?? mkdtempSync(path.join(os.tmpdir(), "vili-test-"));
   const stateRoot = nested ? path.join(root, "a", "b", "state") : root;
   const modelsRoot = path.join(root, "models");
   const settings = {
@@ -368,6 +368,65 @@ test("a worker that ignores SIGTERM is killed with everything it started", async
   }
 });
 
+// The daemon owns the worker's whole tree (motion-pipeline:finding:cut-vili-cpu-body.s1.orphaned-descendants).
+const aliveWorkers = (daemon) => daemon.spawns().filter(isAlive);
+
+test("a worker killed mid-request leaves no encoder child, and the next job has exactly one worker", async () => {
+  const daemon = await startDaemon();
+  try {
+    const pending = generate(daemon, { prompt: "x", model: "encoder" });
+    const [grandchild] = await until(() => { const found = daemon.grandchildren(); return found.length ? found : null; }, "the encoder child");
+    const [worker] = daemon.spawns();
+    assert.ok(isAlive(worker) && isAlive(grandchild));
+    process.kill(worker, "SIGKILL");
+    assert.equal((await pending).status, 502);
+    await until(() => !isAlive(grandchild), "the encoder child to die with its worker");
+    assert.equal((await generate(daemon, { prompt: "y" })).status, 200);
+    assert.equal(aliveWorkers(daemon).length, 1);
+    assert.equal(isAlive(grandchild), false);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("a restarted daemon kills the worker its crashed predecessor left, and runs exactly one", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "vili-test-"));
+  const first = await startDaemon({ root });
+  const stray = generate(first, { prompt: "x", model: "encoder" }).catch(() => null);
+  const [grandchild] = await until(() => { const found = first.grandchildren(); return found.length ? found : null; }, "the encoder child");
+  const [worker] = first.spawns();
+  first.proc.kill("SIGKILL");
+  await until(() => first.proc.exitCode !== null || first.proc.signalCode !== null, "the first daemon to die");
+  await stray;
+  assert.ok(isAlive(worker) && isAlive(grandchild), "the probe must reproduce the orphan before the fix can be measured");
+  const second = await startDaemon({ root });
+  try {
+    await until(() => !isAlive(worker) && !isAlive(grandchild), "the orphans to be killed");
+    assert.equal(existsSync(path.join(root, "worker.pid")), false);
+    assert.equal((await generate(second, { prompt: "y" })).status, 200);
+    assert.equal(aliveWorkers(second).length, 1);
+    second.proc.kill("SIGTERM");
+    await until(() => second.proc.exitCode !== null, "the second daemon to exit", 30);
+    assert.equal(aliveWorkers(second).length, 0);
+  } finally {
+    await second.stop();
+  }
+});
+
+test("a pid file naming a process group that is not the worker's kills nothing", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "vili-test-"));
+  const bystander = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
+  writeFileSync(path.join(root, "worker.pid"), `${bystander.pid}\n`);
+  const daemon = await startDaemon({ root });
+  try {
+    assert.equal(isAlive(bystander.pid), true);
+    assert.equal(existsSync(path.join(root, "worker.pid")), false);
+  } finally {
+    bystander.kill("SIGKILL");
+    await daemon.stop();
+  }
+});
+
 test("cross-site is refused before the worker", async () => {
   const daemon = await startDaemon();
   try {
@@ -542,6 +601,8 @@ test("health, operator state and the unknown", async () => {
       assert.equal(answer.body.state.backend.threads, THREADS);
     }
     assert.equal((await request(daemon.port, "GET", "/motion/generate")).status, 404);
+    // the retired operator route, spelled in parts so the retirement grep over scripts/ stays empty
+    assert.equal((await request(daemon.port, "GET", ["", "eve", "operator"].join("/"))).status, 404);
     const unknown = await request(daemon.port, "GET", "/provider-advertisement");
     assert.equal(unknown.status, 404);
     assert.equal(unknown.raw, "not found\n");

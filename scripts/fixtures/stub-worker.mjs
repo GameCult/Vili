@@ -1,7 +1,7 @@
 // Stands in for kimodo-resident-worker.py in the daemon's tests. It binds port 0, prints the ready line the
 // daemon waits for, and answers /health and /generate with what the daemon gave it. The --model value picks a
 // misbehaviour: crash-before-ready, hang-before-ready, sick, slow-health, stubborn, fail-generate,
-// refuse-generate, drop-generate, slow-generate, graceful (exits 0.5 s after SIGTERM), die-after-ready. Any other value is just the model the worker serves.
+// refuse-generate, drop-generate, slow-generate, encoder (a grandchild, then no answer), graceful (exits 0.5 s after SIGTERM), die-after-ready. Any other value is just the model the worker serves.
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -64,6 +64,12 @@ if (model === "hang-before-ready") {
         if (model === "refuse-generate") return send(200, { ok: false });
         if (model === "drop-generate") return request.socket.destroy();
         if (model === "slow-generate") return;
+        if (model === "encoder") {
+          // an encoder child of the real worker: a grandchild in the worker's group, then a request that never answers
+          const encoder = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+          appendFileSync(spawnLog, `grandchild ${encoder.pid}\n`);
+          return;
+        }
         send(200, {
           ok: true,
           model: model || "stub-model",
