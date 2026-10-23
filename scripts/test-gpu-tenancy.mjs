@@ -156,6 +156,21 @@ test("gate: setAllowed saves before it answers", async () => {
   assert.equal(same.changedAt, "2026-10-23T10:00:01.000Z", "and keeps changedAt");
 });
 
+test("gate: a second release is a no-op and cannot free another job's slot", async () => {
+  const r = rig({ permission: ON });
+  const first = await r.gate.acquire();
+  first.release();
+  const second = await r.gate.acquire();
+  assert.equal(r.gate.status().jobRunning, true);
+  first.release();
+  assert.equal(r.gate.status().jobRunning, true, "a stale release leaves the new holder's slot held");
+  assert.equal((await r.gate.acquire()).refusal.source, "slot");
+  second.release();
+  second.release();
+  assert.equal(r.gate.status().jobRunning, false);
+  assert.equal(typeof (await r.gate.acquire()).release, "function", "the slot is free after the real release");
+});
+
 test("gate: a stored permission is the starting state", () => {
   assert.deepEqual(rig({ permission: ON }).gate.status(), { allowed: true, changedAt: ON.changedAt, jobRunning: false, lastRefusal: null });
   assert.equal(rig({ permission: { allowed: "yes", changedAt: "x" } }).gate.status().allowed, false, "only a true boolean allows");

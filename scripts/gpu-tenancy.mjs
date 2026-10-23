@@ -49,8 +49,11 @@ export function createGpuTenancy({ now, permission, savePermission, readFreeMiB,
       held = false;
       return refuse("vram", { freeMiB: Number.isFinite(freeMiB) ? freeMiB : null, minFreeMiB });
     }
+    let released = false;
     return {
       release() {
+        if (released) return;
+        released = true;
         held = false;
       },
     };
