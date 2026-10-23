@@ -72,6 +72,17 @@ class Identity(unittest.TestCase):
             self.assertEqual(te.read_snapshot_revision(Path(home), "org/name"), "deadbeef")
 
 
+class SnapshotPath(unittest.TestCase):
+    def test_resolves_the_revision_the_mounted_cache_names(self):
+        with tempfile.TemporaryDirectory() as home:
+            repo = Path(home) / "hub" / "models--org--name"
+            (repo / "refs").mkdir(parents=True)
+            (repo / "refs" / "main").write_text("deadbeef
+")
+            (repo / "snapshots" / "deadbeef").mkdir(parents=True)
+            self.assertEqual(te.snapshot_path(Path(home), "org/name"), repo / "snapshots" / "deadbeef")
+
+
 class CachedEncoder(unittest.TestCase):
     def test_one_child_call_for_a_requests_misses_and_none_for_hits(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -167,7 +178,7 @@ class ThreadCap(unittest.TestCase):
 
     def test_the_child_applies_the_cap_before_it_loads_anything(self):
         source = (Path(te.__file__).with_name("kimodo-text-encode.py")).read_text()
-        self.assertLess(source.index("apply_thread_cap(os.environ)"), source.index("load_encoder(preset"))
+        self.assertLess(source.index("apply_thread_cap(os.environ)"), source.index("load_encoder(os.environ"))
 
 
 class ChildBoundary(unittest.TestCase):

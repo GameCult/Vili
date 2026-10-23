@@ -50,6 +50,11 @@ def read_snapshot_revision(hf_home: Path, repo_id: str) -> str:
     return ref.read_text().strip()
 
 
+def snapshot_path(hf_home: Path, repo_id: str) -> Path:
+    """The directory of the snapshot read_snapshot_revision names: assembly B loads from these, never from repo ids."""
+    return Path(hf_home) / "hub" / ("models--" + repo_id.replace("/", "--")) / "snapshots" / read_snapshot_revision(hf_home, repo_id)
+
+
 def encoder_identity(*, assembly: str, device: str, revisions: dict, dtype: str, torch_version: str, transformers_version: str,
                      peft_version: str, accelerate_version: str, kimodo_commit: str, loader_sha256: str) -> str:
     """The canonical string a vector is keyed under: every input that can change it, in a fixed field order.

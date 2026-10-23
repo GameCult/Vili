@@ -15,7 +15,7 @@ import msgpack
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from text_encoding import ASSEMBLY, EMBEDDING_DIM, LLAMA_BASE, apply_thread_cap  # noqa: E402
+from text_encoding import ASSEMBLY, EMBEDDING_DIM, LLAMA_BASE, apply_thread_cap, snapshot_path  # noqa: E402
 
 from peft import PeftModel  # noqa: E402
 from transformers import AutoConfig, AutoTokenizer  # noqa: E402
@@ -24,20 +24,23 @@ from kimodo.model.llm2vec.llm2vec import LLM2Vec  # noqa: E402
 from kimodo.model.load_model import TEXT_ENCODER_PRESETS  # noqa: E402
 
 
-def load_encoder(mntp_id, supervised_id, dtype):
+def load_encoder(hf_home, mntp_id, supervised_id, dtype):
     """Assembly B: the Llama base with the MNTP adapter merged in, then the supervised adapter on top.
 
-    Kimodo's own LLM2VecEncoder loads the MNTP repo as the base and never applies the MNTP weights under the
-    pinned transformers (assembly A); this assembly is ours (motion-pipeline:ruling:encoder-assembly-b). The
-    identity carries the Kimodo commit and this file's sha256, so a changed loader misses the cache.
+    Kimodo's own LLM2VecEncoder loads the MNTP repo as the base (assembly A); this assembly is ours
+    (motion-pipeline:ruling:encoder-assembly-b). Everything loads from the local snapshot directories, as the
+    research's reference vector did: the model's _name_or_path is then a path, not the repo id, so
+    LLM2Vec.prepare_for_tokenization does not wrap the text in Llama's chat header, which is what separates B's
+    vector from A's. The identity carries the Kimodo commit and this file's sha256, so a changed loader misses.
     """
-    tokenizer = AutoTokenizer.from_pretrained(LLAMA_BASE)
+    llama, mntp, supervised = (snapshot_path(hf_home, repo) for repo in (LLAMA_BASE, mntp_id, supervised_id))
+    tokenizer = AutoTokenizer.from_pretrained(llama)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
-    model_class = LLM2Vec._get_model_class(AutoConfig.from_pretrained(LLAMA_BASE).__class__.__name__, enable_bidirectional=True)
-    model = model_class.from_pretrained(LLAMA_BASE, torch_dtype=dtype)
-    model = PeftModel.from_pretrained(model, mntp_id).merge_and_unload()
-    model = PeftModel.from_pretrained(model, supervised_id)
+    model_class = LLM2Vec._get_model_class(AutoConfig.from_pretrained(llama).__class__.__name__, enable_bidirectional=True)
+    model = model_class.from_pretrained(llama, torch_dtype=dtype)
+    model = PeftModel.from_pretrained(model, mntp).merge_and_unload()
+    model = PeftModel.from_pretrained(model, supervised)
     return LLM2Vec(model=model, tokenizer=tokenizer)
 
 
@@ -48,7 +51,7 @@ def main() -> int:
     preset = TEXT_ENCODER_PRESETS["llm2vec"]["kwargs"]
 
     started = time.perf_counter()
-    model = load_encoder(preset["base_model_name_or_path"], preset["peft_model_name_or_path"], getattr(torch, preset["dtype"]))
+    model = load_encoder(os.environ["HF_HOME"], preset["base_model_name_or_path"], preset["peft_model_name_or_path"], getattr(torch, preset["dtype"]))
     model.eval()
     for p in model.parameters():
         p.requires_grad = False
