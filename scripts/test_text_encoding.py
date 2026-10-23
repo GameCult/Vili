@@ -77,8 +77,7 @@ class SnapshotPath(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             repo = Path(home) / "hub" / "models--org--name"
             (repo / "refs").mkdir(parents=True)
-            (repo / "refs" / "main").write_text("deadbeef
-")
+            (repo / "refs" / "main").write_text("deadbeef" + chr(10))
             (repo / "snapshots" / "deadbeef").mkdir(parents=True)
             self.assertEqual(te.snapshot_path(Path(home), "org/name"), repo / "snapshots" / "deadbeef")
 
