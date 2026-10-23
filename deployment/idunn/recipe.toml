@@ -1,0 +1,222 @@
+schema = "gamecult.idunn.target_declaration.v1"
+target = "vili"
+source_stamp_environment = "VILI_BUILD_COMMIT"
+required_gitlinks = ["vendor/CultLib", "vendor/kimodo", "vendor/SOMA-X"]
+
+# The one external input: a relocatable CPython. The locked site-packages are installed into this tree, never into
+# a venv (a venv's bin/python is an absolute link the seal refuses and its pyvenv.cfg names the build workspace).
+[[external_inputs]]
+id = "cpython"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.12.15+20261021-x86_64-unknown-linux-gnu-install_only.tar.gz"
+sha256 = "5ff9f0602ce964a529ed1e8555d3abab6341926d724402ba9a15e9e877191124"
+runner = "python-build"
+destination = "release/cpython.tar.gz"
+
+# ---- node-build: the daemon, the Idunn entry and its dependencies
+
+[[steps]]
+id = "install-cultlib-build-dependencies"
+phase = "prepare"
+runner = "node-build"
+working_directory = "vendor/CultLib"
+required_environment = ["HOME", "NPM_CONFIG_CACHE"]
+argv = ["npm", "ci", "--ignore-scripts"]
+
+[[steps]]
+id = "build-cultcache-ts"
+phase = "prepare"
+runner = "node-build"
+working_directory = "vendor/CultLib"
+required_environment = ["HOME", "NPM_CONFIG_CACHE"]
+argv = ["npm", "run", "build", "--workspace=packages/cultcache-ts"]
+
+[[steps]]
+id = "build-cultnet-ts"
+phase = "prepare"
+runner = "node-build"
+working_directory = "vendor/CultLib"
+required_environment = ["HOME", "NPM_CONFIG_CACHE"]
+argv = ["npm", "run", "build", "--workspace=packages/cultnet-ts"]
+
+[[steps]]
+id = "install-vili-dependencies"
+phase = "prepare"
+runner = "node-build"
+required_environment = ["HOME", "NPM_CONFIG_CACHE"]
+argv = ["npm", "ci", "--ignore-scripts", "--install-links"]
+
+[[steps]]
+id = "test-daemon"
+phase = "test"
+runner = "node-build"
+required_environment = ["HOME", "NPM_CONFIG_CACHE"]
+argv = ["node", "--test", "--test-timeout=60000", "scripts/test-vili-daemon.mjs"]
+
+[[steps]]
+id = "assemble-vili-release"
+phase = "build"
+runner = "node-build"
+required_environment = ["HOME", "NPM_CONFIG_CACHE"]
+argv = ["node", "deployment/idunn/assemble-release.mjs", "release/vili", "release/node"]
+
+# ---- python-build: the interpreter and its locked packages
+
+[[steps]]
+id = "unpack-cpython"
+phase = "prepare"
+runner = "python-build"
+argv = ["tar", "-xzf", "release/cpython.tar.gz", "-C", "release"]
+
+[[steps]]
+id = "install-build-tools"
+phase = "prepare"
+runner = "python-build"
+required_environment = ["HOME", "PIP_CACHE_DIR", "TMPDIR"]
+argv = ["release/python/bin/python3.12", "-m", "pip", "install", "--no-deps", "--require-hashes", "-r", "deployment/idunn/requirements-build.lock"]
+
+[[steps]]
+id = "install-locked-packages"
+phase = "prepare"
+runner = "python-build"
+required_environment = ["HOME", "PIP_CACHE_DIR", "TMPDIR"]
+argv = ["release/python/bin/python3.12", "-m", "pip", "install", "--no-deps", "--require-hashes", "--no-build-isolation", "-r", "deployment/idunn/requirements.lock"]
+
+[[steps]]
+id = "install-vendored-packages"
+phase = "prepare"
+runner = "python-build"
+required_environment = ["HOME", "PIP_CACHE_DIR", "TMPDIR"]
+argv = ["release/python/bin/python3.12", "-m", "pip", "install", "--no-deps", "--no-build-isolation", "--no-index", "vendor/SOMA-X", "vendor/kimodo/MotionCorrection", "vendor/kimodo"]
+
+[[steps]]
+id = "pip-check"
+phase = "test"
+runner = "python-build"
+required_environment = ["HOME", "PIP_CACHE_DIR", "TMPDIR"]
+argv = ["release/python/bin/python3.12", "-m", "pip", "check"]
+
+[[steps]]
+id = "test-worker"
+phase = "test"
+runner = "python-build"
+working_directory = "."
+required_environment = ["HOME", "TMPDIR", "PYTHONPATH"]
+argv = ["release/python/bin/python3.12", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_*.py"]
+
+# Every module the worker and the encoder child import at top level, kimodo.scripts.generate included.
+[[steps]]
+id = "import-smoke"
+phase = "acceptance"
+runner = "python-build"
+required_environment = ["HOME", "TMPDIR", "PYTHONPATH"]
+argv = [
+  "release/python/bin/python3.12", "-c",
+  "import accelerate, cultcache_py, huggingface_hub.constants, kimodo, kimodo.constraints, kimodo.exports.motion_io, kimodo.meta, kimodo.model.llm2vec.llm2vec, kimodo.model.load_model, kimodo.model.loading, kimodo.model.registry, kimodo.scripts.generate, kimodo.tools, msgpack, peft, torch, transformers",
+]
+
+[[steps]]
+id = "compile-python"
+phase = "build"
+runner = "python-build"
+argv = ["release/python/bin/python3.12", "-m", "compileall", "-q", "-j", "4", "--invalidation-mode", "unchecked-hash", "release/python/lib/python3.12"]
+
+# ---- the sealed release: node, vili, python
+
+[[artifacts]]
+id = "node"
+source_kind = "runner-output"
+runner = "node-build"
+source = "release/node/node"
+destination = "node"
+executable = true
+
+[[artifacts]]
+id = "vili"
+source_kind = "runner-output"
+runner = "node-build"
+source = "release/vili"
+destination = "vili"
+
+[[artifacts]]
+id = "python"
+source_kind = "runner-output"
+runner = "python-build"
+source = "release/python"
+destination = "python"
+executable_members = ["bin/python3.12"]
+
+[service]
+executable_artifact = "node"
+required_adjacent_artifacts = ["vili", "python"]
+arguments = [
+  { kind = "literal", value = "vili/scripts/idunn-entry.mjs" },
+  { kind = "literal", value = "--state-root" },
+  { kind = "binding", name = "state_root" },
+  { kind = "literal", value = "--kimodo-commit" },
+  { kind = "literal", value = "6bb58488037dd65360ff0c5d1692b403a23309f7" },
+]
+transport = "http"
+route_required = true
+required_environment = [
+  "GAMECULT_IDUNN_CANDIDATE_BIND",
+  "GAMECULT_IDUNN_PROCESS_WRITE_LEASE",
+  "GAMECULT_IDUNN_RUNTIME_BUNDLE",
+  "VILI_MODELS_ROOT",
+  "VILI_THREADS",
+]
+
+[service.health]
+contract = "gamecult.runtime_presence_health.v2"
+
+[state]
+schema_generation = "vili-v1"
+
+[[state.slots]]
+id = "service-store"
+relative_path = "vili.service.cc"
+kind = "cultcache-file"
+schema = "gamecult.vili.operator_state.v1"
+writer = "process-bound-single-writer"
+recovery = "rebuildable"
+startup = "create-or-open-after-write-lease"
+
+[[state.slots]]
+id = "text-embeddings"
+relative_path = "embeddings/text-embeddings.cc"
+kind = "cultcache-file"
+schema = "gamecult.vili.text_embedding.v0"
+writer = "process-bound-single-writer"
+recovery = "rebuildable"
+startup = "create-or-open-after-write-lease"
+
+[[state.slots]]
+id = "jobs"
+relative_path = "jobs"
+kind = "external-directory"
+schema = "gamecult.vili.motion_job.v0"
+writer = "process-bound-single-writer"
+recovery = "preserve"
+startup = "create-or-open-after-write-lease"
+
+[[state.slots]]
+id = "artifacts"
+relative_path = "artifacts"
+kind = "external-directory"
+schema = "gamecult.vili.motion_artifact.v0"
+writer = "process-bound-single-writer"
+recovery = "preserve"
+startup = "create-or-open-after-write-lease"
+
+[[state.slots]]
+id = "logs"
+relative_path = "logs"
+kind = "external-directory"
+schema = "text.log"
+writer = "process-bound-single-writer"
+recovery = "rebuildable"
+startup = "create-or-open-after-write-lease"
+
+[[provides]]
+capability = "vili.motion.api"
+schema = "http.v1"
+compatibility = "v1"
