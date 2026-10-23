@@ -1,0 +1,31 @@
+# Vili's CPU worker: torch from the CPU index, Kimodo 6bb58488's runtime pins as the CPU probe installed them
+# (motion-pipeline map, Body facts; probe Dockerfile), msgpack for cultcache-py and the worker's imports.
+# kimodo, MotionCorrection and SOMA-X install from the vendored gitlinks, never from here.
+# Compile on Yggdrasil in a container (never on Starfire):
+#   uv pip compile --generate-hashes --python-version 3.12 --python-platform x86_64-manylinux_2_28 \
+#     --index-strategy unsafe-best-match -c requirements-build.lock requirements.in -o requirements.lock
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.5.1+cpu
+msgpack
+hydra-core==1.3.2
+omegaconf==2.3.0
+scipy==1.15.3
+einops==0.8.2
+tqdm
+pydantic==2.12.5
+trimesh==4.11.3
+pillow
+numpy==1.26.4
+peft==0.18.1
+transformers==5.1.0
+accelerate==1.13.0
+safetensors==0.7.0
+huggingface-hub==1.6.0
+tokenizers==0.22.2
+psutil
+packaging
+filelock
+boto3
+bvhio
+gradio_client>=1.0
+urllib3>=2.6.3
