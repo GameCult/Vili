@@ -29,8 +29,8 @@ if (model === "crash-before-ready") process.exit(3);
 
 if (model === "stubborn") {
   process.on("SIGTERM", () => {});
-  const grandchild = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
-  appendFileSync(spawnLog, `grandchild ${grandchild.pid}\n`);
+  // the grandchild reports itself once its handler is armed, so a test never reads a pid that would die of the default SIGTERM
+  spawn(process.execPath, ["-e", `process.on('SIGTERM', () => {}); require('fs').appendFileSync(${JSON.stringify(spawnLog)}, 'grandchild ' + process.pid + '\\n'); setInterval(() => {}, 1000)`], { stdio: "ignore" });
 }
 
 if (model === "graceful") {
@@ -66,8 +66,7 @@ if (model === "hang-before-ready") {
         if (model === "slow-generate") return;
         if (model === "encoder") {
           // an encoder child of the real worker: a grandchild in the worker's group, then a request that never answers
-          const encoder = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore" });
-          appendFileSync(spawnLog, `grandchild ${encoder.pid}\n`);
+          spawn(process.execPath, ["-e", `process.on('SIGTERM', () => {}); require('fs').appendFileSync(${JSON.stringify(spawnLog)}, 'grandchild ' + process.pid + '\\n'); setInterval(() => {}, 1000)`], { stdio: "ignore" });
           return;
         }
         send(200, {

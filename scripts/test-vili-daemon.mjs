@@ -2,16 +2,18 @@
 // Runs the real daemon against scripts/fixtures/stub-worker.mjs as its --python/--worker-entry.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { decode, encode } from "@msgpack/msgpack";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const daemonPath = path.join(here, "vili-daemon.mjs");
 const stubPath = path.join(here, "fixtures", "stub-worker.mjs");
+const fakeIdunnEntry = path.join(here, "fixtures", "fake-idunn-entry.mjs");
 const THREADS = 5;
 
 async function until(condition, what, seconds = 15) {
@@ -40,7 +42,7 @@ function isAlive(pid) {
 
 async function startDaemon({
   omit = [], viaEnv = false, threads = String(THREADS), python = process.execPath, nested = false, host = "127.0.0.1",
-  relativeModels = false, extraArgs = [], root: givenRoot = null,
+  relativeModels = false, extraArgs = [], root: givenRoot = null, entry = daemonPath, extraEnv = {}, hold = entry === daemonPath,
 } = {}) {
   const root = givenRoot ?? mkdtempSync(path.join(os.tmpdir(), "vili-test-"));
   const stateRoot = nested ? path.join(root, "a", "b", "state") : root;
@@ -57,9 +59,9 @@ async function startDaemon({
   };
   if (threads !== null) settings.threads = threads;
   for (const name of omit) delete settings[name];
-  const env = { ...process.env, LEAK_CHECK: "leaked", LANG: "xx_TEST.UTF-8" };
+  const env = { ...process.env, LEAK_CHECK: "leaked", LANG: "xx_TEST.UTF-8", ...extraEnv };
   for (const name of Object.keys(env)) if (name.startsWith("VILI_")) delete env[name];
-  const argv = [daemonPath, ...extraArgs];
+  const argv = [entry, ...extraArgs];
   for (const [name, value] of Object.entries(settings)) {
     if (viaEnv) env[`VILI_${{ host: "DAEMON_HOST", port: "DAEMON_PORT", "state-root": "STATE_ROOT", "worker-entry": "WORKER_ENTRY" }[name] ?? name.toUpperCase().replace("-", "_")}`] = value;
     else argv.push(`--${name}`, value);
@@ -71,17 +73,21 @@ async function startDaemon({
   proc.stderr.on("data", (chunk) => { errors += chunk; });
   const listening = await until(() => /listening on http:\/\/([^:]+):(\d+)/.exec(output), "the daemon to listen");
   const port = listening[2];
+  // the hand-run daemon takes its lock after it listens; a test that wants a served state root waits for it
+  if (hold) await until(() => /holds the state root/.test(output), "the daemon to hold the state root");
   const spawnLog = () => {
     const log = path.join(stateRoot, "embeddings", "stub-spawns.log");
     return existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : [];
   };
   return {
+    root,
     stateRoot,
     modelsRoot,
     proc,
     boundHost: listening[1],
     port: Number(port),
     stderr: () => errors,
+    stdout: () => output,
     spawns: () => spawnLog().filter((line) => /^\d+$/.test(line)).map(Number),
     grandchildren: () => spawnLog().filter((line) => line.startsWith("grandchild ")).map((line) => Number(line.split(" ")[1])),
     async stop() {
@@ -429,11 +435,14 @@ test("a live worker outside the pid file's group is left alone", async () => {
   try {
     assert.equal((await generate(first)).status, 200);
     const [worker] = first.spawns();
+    first.proc.kill("SIGKILL");
+    await until(() => first.proc.exitCode !== null || first.proc.signalCode !== null, "the first daemon to die");
     writeFileSync(path.join(root, "worker.pid"), `${bystander.pid}\n`);
     const second = await startDaemon({ root });
     assert.ok(isAlive(worker) && isAlive(bystander.pid), "only the group the pid file names, and only if it is ours, is killed");
     second.proc.kill("SIGTERM");
     await until(() => second.proc.exitCode !== null, "the second daemon to exit", 30);
+    process.kill(-worker, "SIGKILL");
   } finally {
     bystander.kill("SIGKILL");
     await first.stop();
@@ -655,22 +664,6 @@ test("the typed service state is refreshed while the daemon runs", async () => {
   }
 });
 
-test("--health asks a running daemon, and fails when there is none", async () => {
-  const daemon = await startDaemon();
-  const check = (port) => new Promise((resolve) => {
-    const proc = spawn(process.execPath, [daemonPath, "--health", "--host", "127.0.0.1", "--port", String(port)], { stdio: "ignore" });
-    proc.on("exit", resolve);
-  });
-  try {
-    assert.equal(await check(daemon.port), 0);
-    const gone = daemon.port;
-    await daemon.stop();
-    assert.equal(await check(gone), 1);
-  } finally {
-    await daemon.stop();
-  }
-});
-
 test("a thread count outside 1 to 16 stops the daemon without echoing it", async () => {
   for (const threads of ["0", "17", "99", "100", "8x", "x8", "-1", "1.5"]) {
     const proc = spawn(process.execPath, [daemonPath, "--threads", threads], { stdio: ["ignore", "pipe", "pipe"] });
@@ -681,5 +674,163 @@ test("a thread count outside 1 to 16 stops the daemon without echoing it", async
     assert.equal(code, 2);
     assert.match(output, /threads must be an integer from 1 to 16/);
     assert.ok(!output.replace("from 1 to 16", "").includes(threads), `the refusal repeated ${threads}`);
+  }
+});
+
+const msgpackPost = (daemon, body, headers = {}) =>
+  new Promise((resolve, reject) => {
+    const req = http.request({ host: "127.0.0.1", port: daemon.port, method: "POST", path: "/cultnet/snapshot", headers: { "content-type": "application/msgpack", ...headers } }, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, raw: Buffer.concat(chunks) }));
+    });
+    req.on("error", reject);
+    req.end(body);
+  });
+const SECRET = "canary-9f3c-never-echoed";
+const snapshotRequest = (messageId = "m1") => Buffer.from(encode({ schemaVersion: "cultnet.snapshot_request.v0", messageId }));
+
+// A second daemon on a state root a live daemon holds must refuse, and must not touch the first one's worker.
+test("a second daemon on a live state root exits 2 and kills nothing", async () => {
+  const first = await startDaemon();
+  try {
+    assert.equal((await generate(first)).status, 200);
+    const [worker] = first.spawns();
+    assert.ok(isAlive(worker));
+    const second = await startDaemon({ root: first.root, hold: false });
+    await until(() => second.proc.exitCode !== null, "the second daemon to refuse", 20);
+    assert.equal(second.proc.exitCode, 2);
+    assert.match(second.stderr(), /held by a running daemon/);
+    assert.ok(isAlive(worker), "the first daemon's worker must survive the refusal");
+    assert.equal((await generate(first)).status, 200);
+    assert.equal(aliveWorkers(first).length, 1);
+  } finally {
+    await first.stop();
+  }
+});
+
+const idunnDaemon = async ({ leased = false, extraEnv = {} } = {}) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "vili-test-"));
+  const lease = path.join(root, "lease");
+  const healthLog = path.join(root, "health.log");
+  if (leased) writeFileSync(lease, "");
+  const daemon = await startDaemon({
+    root, nested: true, entry: fakeIdunnEntry, extraEnv: { FAKE_IDUNN_LEASE: lease, FAKE_IDUNN_HEALTH_LOG: healthLog, ...extraEnv },
+  });
+  return Object.assign(daemon, { lease, health: () => (existsSync(healthLog) ? readFileSync(healthLog, "utf8").split("\n").filter(Boolean) : []) });
+};
+
+test("before the lease nothing is written, spawned or accepted", async () => {
+  const daemon = await idunnDaemon();
+  try {
+    const answer = await generate(daemon);
+    assert.equal(answer.status, 503);
+    assert.equal(answer.body.code, "write-lease-pending");
+    assert.deepEqual(daemon.spawns(), []);
+    assert.equal(existsSync(daemon.stateRoot), false, "the state root must not exist before the lease");
+    assert.deepEqual(daemon.health(), []);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("with the lease the daemon writes and serves, and no pid file exists", async () => {
+  const daemon = await idunnDaemon();
+  try {
+    writeFileSync(daemon.lease, "");
+    await until(() => existsSync(path.join(daemon.stateRoot, "vili.service.cc")), "the service store", 10);
+    const answer = await generate(daemon);
+    assert.equal(answer.status, 200);
+    assert.equal(existsSync(path.join(daemon.stateRoot, "worker.pid")), false);
+    assert.equal(existsSync(path.join(daemon.stateRoot, "daemon.lock")), false);
+    assert.deepEqual(daemon.health(), ["active"]);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("losing the lease kills the worker tree, refuses, and writes nothing more", async () => {
+  const daemon = await idunnDaemon({ leased: true });
+  try {
+    await until(() => existsSync(path.join(daemon.stateRoot, "vili.service.cc")), "the service store", 10);
+    assert.equal((await generate(daemon, { prompt: "x", model: "stubborn" })).status, 200);
+    const [worker] = daemon.spawns();
+    const [grandchild] = await until(() => { const found = daemon.grandchildren(); return found.length ? found : null; }, "the armed grandchild");
+    assert.ok(isAlive(worker) && isAlive(grandchild));
+    rmSync(daemon.lease);
+    await until(() => !isAlive(worker) && !isAlive(grandchild), "the worker tree to die", 20);
+    const answer = await generate(daemon);
+    assert.equal(answer.status, 503);
+    assert.equal(answer.body.code, "write-lease-lost");
+    await until(() => daemon.health().join() === "active,degraded", "the health to say degraded");
+    const store = path.join(daemon.stateRoot, "vili.service.cc");
+    const before = statSync(store).mtimeMs;
+    const jobs = readdirSync(path.join(daemon.stateRoot, "jobs")).length;
+    await new Promise((resolve) => setTimeout(resolve, 6500));
+    assert.equal(statSync(store).mtimeMs, before);
+    assert.equal(readdirSync(path.join(daemon.stateRoot, "jobs")).length, jobs);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("a job that finishes after the lease is lost is not recorded", async () => {
+  const daemon = await idunnDaemon({ leased: true });
+  try {
+    await until(() => existsSync(path.join(daemon.stateRoot, "vili.service.cc")), "the service store", 10);
+    const slow = generate(daemon, { prompt: "x", model: "slow-generate" });
+    await until(() => daemon.spawns().length, "the worker");
+    await until(() => request(daemon.port, "GET", "/health").then((r) => r.body?.state?.backend?.state === "ready"), "the worker to be ready");
+    rmSync(daemon.lease);
+    const answer = await slow;
+    assert.equal(answer.status, 503);
+    assert.equal(answer.body.code, "write-lease-lost");
+    assert.deepEqual(readdirSync(path.join(daemon.stateRoot, "jobs")), []);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("the route challenge is answered ahead of the cross-site refusal, and an Origin is still refused", async () => {
+  const daemon = await idunnDaemon();
+  try {
+    // the challenge is how Idunn learns the incarnation is warming, so it is answered before the lease
+    const answered = await msgpackPost(daemon, snapshotRequest("m-42"));
+    assert.equal(answered.status, 200);
+    assert.equal(answered.headers["content-type"], "application/msgpack");
+    const message = decode(answered.raw);
+    assert.equal(message.schemaVersion, "cultnet.snapshot_response_raw.v0");
+    assert.equal(message.messageId, "m-42");
+    assert.equal(message.documents.length, 1);
+    assert.equal((await msgpackPost(daemon, snapshotRequest(), { origin: "https://evil.example" })).status, 403);
+    assert.equal((await msgpackPost(daemon, Buffer.from("not msgpack at all"))).status, 400);
+    assert.equal((await msgpackPost(daemon, Buffer.from(encode({ schemaVersion: "cultnet.snapshot_response_raw.v0", messageId: "x", documents: [] })))).status, 400);
+    assert.equal((await msgpackPost(daemon, Buffer.alloc(70 * 1024))).status, 400);
+    const text = await request(daemon.port, "POST", "/motion/generate", { body: "{}", headers: { "content-type": "text/plain" } });
+    assert.equal(text.status, 403);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("a signer that cannot answer gives 503 and echoes nothing", async () => {
+  const daemon = await idunnDaemon({ extraEnv: { FAKE_IDUNN_ANSWER_THROWS: "1" } });
+  try {
+    const answered = await msgpackPost(daemon, snapshotRequest(SECRET));
+    assert.equal(answered.status, 503);
+    assert.ok(!answered.raw.toString("utf8").includes(SECRET));
+    assert.ok(!daemon.stderr().includes(SECRET));
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("the hand-run daemon has no route challenge", async () => {
+  const daemon = await startDaemon();
+  try {
+    assert.equal((await msgpackPost(daemon, snapshotRequest())).status, 404);
+    assert.equal((await msgpackPost(daemon, snapshotRequest(), { origin: "https://evil.example" })).status, 404);
+  } finally {
+    await daemon.stop();
   }
 });

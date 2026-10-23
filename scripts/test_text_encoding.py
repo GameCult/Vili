@@ -55,6 +55,9 @@ class Identity(unittest.TestCase):
         self.assertNotEqual(key, te.embedding_key("id", "text b"))
         self.assertNotEqual(te.embedding_key("id", "a" * 300 + "x"), te.embedding_key("id", "a" * 300 + "y"))
 
+    def test_key_is_case_sensitive(self):
+        self.assertNotEqual(te.embedding_key("id", "A person waves."), te.embedding_key("id", "a person waves."))
+
     def test_chat_header_is_the_llama3_user_turn_pooled_after_the_separator(self):
         header = "<|start_header_id|>user<|end_header_id|>" + chr(10) * 2
         self.assertEqual(te.chat_header("hello  "), header + "!@#$%^&*()hello<|eot_id|>")
@@ -267,6 +270,51 @@ class ChildBoundary(unittest.TestCase):
         """, texts=("aa", "bb"))
         self.assertEqual(answer["texts_seen"], ["aa", "bb"])
         self.assertEqual(len(answer["vectors"]), 2)
+
+
+class ChildHeader(unittest.TestCase):
+    def test_every_text_is_tokenized_with_the_chat_header(self):
+        import importlib.util
+        import torch
+        spec = importlib.util.spec_from_file_location("kimodo_text_encode", Path(te.__file__).with_name("kimodo-text-encode.py"))
+        child = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(child)
+
+        class Recorder:
+            def __init__(self):
+                self.seen = []
+
+            def tokenize(self, batch):
+                self.seen.extend(batch)
+                return batch
+
+            def forward(self, features):
+                return torch.zeros(1, te.EMBEDDING_DIM)
+
+        model = Recorder()
+        vectors, seconds = child.encode_texts(model, ["a person waves", "  padded  "])
+        self.assertEqual(model.seen, [te.chat_header("a person waves"), te.chat_header("  padded  ")])
+        for header in model.seen:
+            self.assertTrue(header.startswith("<|start_header_id|>user<|end_header_id|>" + chr(10) * 2))
+        self.assertEqual([len(v) for v in vectors], [te.EMBEDDING_DIM * 4] * 2)
+        self.assertEqual(len(seconds), 2)
+
+
+# sha256 of the two Kimodo sources the encoder mirrors, at vendor/kimodo 6bb58488 (embedding-identity-complete).
+# A Kimodo bump that changes either file must re-read the mirrored loader before these move.
+KIMODO_LOADER_SHA256 = {
+    "model/load_model.py": "008092cd0b7adef1faea9fa9075718a61bea8ca9feaf9acf1b1d6caacaa0380a",
+    "model/llm2vec/llm2vec.py": "dc6e8b7d38086b4f456e013ab22cd4cc2cd72eb7fd2c13069f037f42aec80857",
+}
+
+
+class KimodoPin(unittest.TestCase):
+    def test_the_mirrored_loader_sources_are_the_pinned_ones(self):
+        import hashlib
+        import kimodo
+        root = Path(kimodo.__file__).resolve().parent
+        for relative, expected in KIMODO_LOADER_SHA256.items():
+            self.assertEqual(hashlib.sha256((root / relative).read_bytes()).hexdigest(), expected, relative)
 
 
 REFERENCE_MODELS = os.environ.get("VILI_REFERENCE_MODELS")

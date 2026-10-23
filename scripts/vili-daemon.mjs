@@ -5,7 +5,8 @@ import { closeSync, openSync, readdirSync, readFileSync, unlinkSync, writeFileSy
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline";
-import { fileURLToPath } from "node:url";
+import net from "node:net";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 
@@ -16,7 +17,7 @@ const {
   SingleFileMessagePackBackingStore,
   defineDocumentRegistry,
   defineDocumentType,
-} = require("cultcache-ts");
+} = require("@gamecult/cultcache-ts");
 const projectRoot = path.resolve(__dirname, "..");
 const providerId = "vili.animation";
 const viliStoreFileName = "vili.service.cc";
@@ -85,7 +86,6 @@ function parseArgs(argv) {
     threads: env.VILI_THREADS || "8",
     kimodoCommit: env.VILI_KIMODO_COMMIT || "",
     pythonEnv: env.VILI_PYTHON_ENV || "",
-    health: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -99,7 +99,6 @@ function parseArgs(argv) {
     else if (arg === "--threads") args.threads = argv[++index];
     else if (arg === "--kimodo-commit") args.kimodoCommit = argv[++index];
     else if (arg === "--python-env") args.pythonEnv = argv[++index];
-    else if (arg === "--health") args.health = true;
   }
   if (!/^[0-9]{1,2}$/.test(String(args.threads)) || Number(args.threads) < 1 || Number(args.threads) > MAX_THREADS) {
     console.error(`threads must be an integer from 1 to ${MAX_THREADS}`);
@@ -294,11 +293,9 @@ function waitForExit(proc, timeoutMs) {
 }
 
 // The worker leads its own process group (its pid is the group id), so the encoder child it spawns is in the group
-// too. The daemon owns the whole group: it is killed when the worker exits for any reason, on a requested stop, and
-// at the next start if a crashed daemon left it behind (reclaimStrayWorker). Under systemd, KillMode=control-group
-// is the same ownership from outside the process.
-const workerPidFile = () => path.join(args.stateRoot, "worker.pid");
-
+// too. The daemon owns the whole group: it is killed when the worker exits for any reason and on a requested stop.
+// A crashed hand-run daemon's group is reclaimed by the next hand-run daemon (handRunRuntime). Under Idunn the
+// unit's cgroup is the same ownership from outside the process.
 function killGroup(pgid, signal) {
   try {
     process.kill(-pgid, signal);
@@ -307,46 +304,102 @@ function killGroup(pgid, signal) {
   }
 }
 
-function forgetWorkerPid(pid) {
-  try {
-    if (readFileSync(workerPidFile(), "utf8").trim() === String(pid)) unlinkSync(workerPidFile());
-  } catch {
-    // no pid file, or another worker's
-  }
-}
+// The hand-run way of owning a state root (tests, development): a Unix socket lock, the worker's pid file and the
+// /proc reclaim. Idunn's runtime (scripts/idunn-entry.mjs) replaces all three with its process write lease.
+export function handRunRuntime(stateRoot) {
+  const lockPath = path.join(stateRoot, "daemon.lock");
+  const pidFile = path.join(stateRoot, "worker.pid");
+  let lock = null;
 
-// A worker left by a crashed daemon: the pid file names its group, and the group is ours only if some member
-// still carries this state root's embeddings directory in its environment (the pid may have been reused).
-function reclaimStrayWorker() {
-  let pgid;
-  try {
-    pgid = Number(readFileSync(workerPidFile(), "utf8").trim());
-  } catch {
-    return;
-  }
-  const marker = `VILI_EMBEDDINGS_DIR=${path.join(args.stateRoot, "embeddings")}`;
-  let ours = false;
-  try {
-    for (const entry of readdirSync("/proc")) {
-      if (!/^\d+$/.test(entry)) continue;
-      try {
-        const stat = readFileSync(`/proc/${entry}/stat`, "utf8");
-        const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-        if (Number(fields[2]) !== pgid) continue;
-        if (readFileSync(`/proc/${entry}/environ`, "utf8").split("\0").includes(marker)) ours = true;
-      } catch {
-        // the process exited while we looked
-      }
+  const listen = () => new Promise((resolve, reject) => {
+    const server = net.createServer((socket) => socket.destroy());
+    server.once("error", reject);
+    server.listen(lockPath, () => {
+      server.removeListener("error", reject);
+      lock = server;
+      resolve();
+    });
+  });
+
+  const probe = () => new Promise((resolve) => {
+    const socket = net.connect(lockPath);
+    socket.once("connect", () => { socket.destroy(); resolve("live"); });
+    socket.once("error", () => resolve("stale"));
+  });
+
+  // A worker left by a crashed daemon: the pid file names its group, and the group is ours only if some member
+  // still carries this state root's embeddings directory in its environment (the pid may have been reused).
+  function reclaimStrayWorker() {
+    let pgid;
+    try {
+      pgid = Number(readFileSync(pidFile, "utf8").trim());
+    } catch {
+      return;
     }
-  } catch {
-    // no /proc: nothing can be verified, so nothing is killed
+    const marker = `VILI_EMBEDDINGS_DIR=${path.join(stateRoot, "embeddings")}`;
+    let ours = false;
+    try {
+      for (const entry of readdirSync("/proc")) {
+        if (!/^\d+$/.test(entry)) continue;
+        try {
+          const stat = readFileSync(`/proc/${entry}/stat`, "utf8");
+          const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+          if (Number(fields[2]) !== pgid) continue;
+          if (readFileSync(`/proc/${entry}/environ`, "utf8").split("\0").includes(marker)) ours = true;
+        } catch {
+          // the process exited while we looked
+        }
+      }
+    } catch {
+      // no /proc: nothing can be verified, so nothing is killed
+    }
+    if (ours) killGroup(pgid, "SIGKILL");
+    try {
+      unlinkSync(pidFile);
+    } catch {
+      // already gone
+    }
   }
-  if (ours) killGroup(pgid, "SIGKILL");
-  try {
-    unlinkSync(workerPidFile());
-  } catch {
-    // already gone
-  }
+
+  return {
+    async acquire() {
+      await mkdir(stateRoot, { recursive: true });
+      try {
+        await listen();
+      } catch (error) {
+        if (error?.code !== "EADDRINUSE") throw error;
+        if ((await probe()) === "live") {
+          console.error("the state root is held by a running daemon");
+          process.exit(2);
+        }
+        unlinkSync(lockPath);
+        await listen();
+      }
+      reclaimStrayWorker(); // synchronous: no request is served before a predecessor's worker is gone
+    },
+    held: () => lock !== null,
+    refusal: () => "write-lease-pending",
+    watch() {},
+    recordWorker(pid) {
+      writeFileSync(pidFile, `${pid}\n`);
+    },
+    forgetWorker(pid) {
+      try {
+        if (readFileSync(pidFile, "utf8").trim() === String(pid)) unlinkSync(pidFile);
+      } catch {
+        // no pid file, or another worker's
+      }
+    },
+    release() {
+      if (lock) lock.close();
+      lock = null;
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        // already gone
+      }
+    },
+  };
 }
 
 async function stopWorker() {
@@ -374,10 +427,10 @@ async function startWorker(model, timeoutMs) {
   });
   closeSync(logFd);
   if (proc.pid !== undefined) {
-    writeFileSync(workerPidFile(), `${proc.pid}\n`);
+    runtime.recordWorker(proc.pid);
     proc.once("exit", () => {
       killGroup(proc.pid, "SIGKILL"); // whatever the worker left running, an encoder child included
-      forgetWorkerPid(proc.pid);
+      runtime.forgetWorker(proc.pid);
     });
   }
   Object.assign(worker, { state: "starting", proc, pid: proc.pid ?? null, port: null, servedModels: [], lastError: null });
@@ -463,6 +516,10 @@ async function readRequestBody(request) {
 }
 
 async function generateMotion(request, response) {
+  if (!runtime.held()) {
+    json(response, 503, { ok: false, code: runtime.refusal() });
+    return;
+  }
   if (workerUnconfigured()) {
     json(response, 503, { ok: false, code: "worker-unconfigured" });
     return;
@@ -593,6 +650,11 @@ async function generateMotion(request, response) {
     result = { ok: false, error: `the worker request failed (${error?.name || "Error"})`, body: null };
   }
 
+  if (!runtime.held()) {
+    // the writer was lost while the job ran: nothing more is written
+    json(response, 503, { ok: false, code: runtime.refusal() });
+    return;
+  }
   const job = {
     schema: "gamecult.vili.motion_job.v0",
     jobId,
@@ -612,8 +674,48 @@ async function generateMotion(request, response) {
   json(response, result.ok ? 200 : 502, job);
 }
 
+const SNAPSHOT_BODY_MAX = 64 * 1024;
+
+// Idunn's route challenge: a msgpack POST from the host, answered from local authority. A browser page can send
+// it too, so an Origin is refused exactly as on every other POST. Only the Idunn runtime answers; the hand-run
+// daemon has no such route.
+async function answerRouteChallenge(request, response) {
+  if (!runtime.answerSnapshot) {
+    text(response, 404, "not found\n");
+    return;
+  }
+  if (request.headers.origin !== undefined) {
+    json(response, 403, { ok: false, code: "cross-site" });
+    return;
+  }
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > SNAPSHOT_BODY_MAX) {
+      json(response, 400, { ok: false, code: "invalid-snapshot-request" });
+      return;
+    }
+    chunks.push(chunk);
+  }
+  let answer;
+  try {
+    answer = runtime.answerSnapshot(Buffer.concat(chunks));
+  } catch (error) {
+    if (error?.code === "invalid-snapshot-request") json(response, 400, { ok: false, code: error.code });
+    else json(response, 503, { ok: false, code: "runtime-presence-unavailable" });
+    return;
+  }
+  response.writeHead(200, { "content-type": "application/msgpack", "cache-control": "no-store" });
+  response.end(answer);
+}
+
 async function handleRequest(request, response) {
   const url = new URL(request.url, `http://${request.headers.host || `${args.host}:${args.port}`}`);
+  if (url.pathname === "/cultnet/snapshot" && request.method === "POST") {
+    await answerRouteChallenge(request, response);
+    return;
+  }
   if (request.method === "POST" && refuseCrossSite(request, response)) return;
 
   if (url.pathname === "/" || url.pathname === "/health") {
@@ -627,23 +729,13 @@ async function handleRequest(request, response) {
   }
 }
 
-async function healthCheck() {
-  const host = args.host === "0.0.0.0" ? "127.0.0.1" : args.host;
-  const response = await fetch(`http://${host}:${args.port}/health`);
-  if (!response.ok) throw new Error(`health returned ${response.status}`);
-  const body = await response.json();
-  if (!body.ok) throw new Error("health returned ok=false");
-}
+let runtime;
 
-if (args.health) {
-  healthCheck().then(() => process.exit(0), (error) => {
-    console.error(error.message);
-    process.exit(1);
-  });
-} else {
-  await mkdir(path.join(args.stateRoot, "jobs"), { recursive: true });
-  await persistSurfaces();
-
+// The one daemon. `rt` owns the state root: the hand-run runtime (socket lock) or Idunn's (process write lease).
+// The server listens first, so Idunn's challenge can be answered while the lease is still pending; nothing is
+// written to the state root until the runtime holds it.
+export async function serve(rt) {
+  runtime = rt;
   const server = http.createServer((request, response) => {
     handleRequest(request, response).catch((error) => {
       // The error's message can carry the request; name only its class.
@@ -652,20 +744,39 @@ if (args.health) {
       else response.end();
     });
   });
+  await new Promise((resolve) => server.listen(args.port, args.host, resolve));
+  console.log(`Vili listening on http://${args.host}:${server.address().port}`);
 
-  server.listen(args.port, args.host, () => {
-    reclaimStrayWorker(); // synchronous: no request is served before a predecessor's worker is gone
-    console.log(`Vili listening on http://${args.host}:${server.address().port}`);
-  });
-
-  const surfaceTimer = setInterval(() => persistSurfaces().catch((error) => console.error(`persist failed: ${error?.name || "Error"}`)), 5000);
-
+  let surfaceTimer = null;
   const shutdown = async () => {
     clearInterval(surfaceTimer);
     await stopWorker();
+    runtime.release();
     server.close();
     process.exit(0);
   };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
+
+  await runtime.acquire();
+  await mkdir(path.join(args.stateRoot, "jobs"), { recursive: true });
+  await persistSurfaces();
+  let lost = false;
+  const onLost = () => {
+    if (lost) return;
+    lost = true;
+    clearInterval(surfaceTimer);
+    stopWorker().finally(() => runtime.reportHealth?.("degraded"));
+  };
+  surfaceTimer = setInterval(() => {
+    runtime.watch(onLost);
+    if (lost) return;
+    persistSurfaces().catch((error) => console.error(`persist failed: ${error?.name || "Error"}`));
+  }, 5000);
+  runtime.reportHealth?.("active");
+  console.log("Vili holds the state root");
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await serve(handRunRuntime(args.stateRoot));
 }
