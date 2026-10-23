@@ -693,11 +693,12 @@ const snapshotRequest = (messageId = "m1") => Buffer.from(encode({ schemaVersion
 // A second daemon on a state root a live daemon holds must refuse, and must not touch the first one's worker.
 test("a second daemon on a live state root exits 2 and kills nothing", async () => {
   const first = await startDaemon();
+  let second = null;
   try {
     assert.equal((await generate(first)).status, 200);
     const [worker] = first.spawns();
     assert.ok(isAlive(worker));
-    const second = await startDaemon({ root: first.root, hold: false });
+    second = await startDaemon({ root: first.root, hold: false });
     await until(() => second.proc.exitCode !== null, "the second daemon to refuse", 20);
     assert.equal(second.proc.exitCode, 2);
     assert.match(second.stderr(), /held by a running daemon/);
@@ -705,6 +706,7 @@ test("a second daemon on a live state root exits 2 and kills nothing", async () 
     assert.equal((await generate(first)).status, 200);
     assert.equal(aliveWorkers(first).length, 1);
   } finally {
+    if (second && second.proc.exitCode === null && second.proc.signalCode === null) second.proc.kill("SIGKILL"); // a daemon that failed to refuse must not outlive the test
     await first.stop();
   }
 });
