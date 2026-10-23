@@ -299,6 +299,23 @@ class ChildHeader(unittest.TestCase):
         self.assertEqual([len(v) for v in vectors], [te.EMBEDDING_DIM * 4] * 2)
         self.assertEqual(len(seconds), 2)
 
+    def test_a_vector_of_the_wrong_width_is_refused(self):
+        import importlib.util
+        import torch
+        spec = importlib.util.spec_from_file_location("kimodo_text_encode", Path(te.__file__).with_name("kimodo-text-encode.py"))
+        child = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(child)
+
+        class Narrow:
+            def tokenize(self, batch):
+                return batch
+
+            def forward(self, features):
+                return torch.zeros(1, te.EMBEDDING_DIM - 1)
+
+        with self.assertRaises(AssertionError):
+            child.encode_texts(Narrow(), ["a person waves"])
+
 
 # sha256 of the two Kimodo sources the encoder mirrors, at vendor/kimodo 6bb58488 (embedding-identity-complete).
 # A Kimodo bump that changes either file must re-read the mirrored loader before these move.
