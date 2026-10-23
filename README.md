@@ -13,7 +13,7 @@ supervises Vili.
 - **Problem:** Personas and games need generated motion, but cold per-request model loads cost minutes. One daemon owns job identity, worker lifecycle, the thread budget and artifact references, so callers touch no model state.
 - **Entry points:** `scripts/vili-daemon.mjs` (the daemon; `npm start`, `npm run health`, `npm test`), `scripts/kimodo-resident-worker.py` (the worker it spawns), `scripts/kimodo-text-encode.py` (the one-shot encoder child), `POST /motion/generate` (see Motion Generation), `docs/verse-service-contract.md` and `docs/motion-pipeline-target.md`.
 - **Live:** the process tree below, run by hand: `POST /motion/generate`, `GET /health`, `GET /operator-state`, and the CultCache service store. It produces `motion.npz` and optional BVH on the SOMA skeleton; there is no FBX export.
-- **Planned:** admission to Idunn on Yggdrasil with a locked virtual environment, then FBX export and a text-prompt-to-Unity-clip path with no hand steps (`docs/motion-pipeline-target.md`). The Raven instance still runs a retired branch until the admission cut tears it down.
+- **Planned:** admission to Idunn on Yggdrasil with a locked virtual environment, then FBX export and a text-prompt-to-Unity-clip path with no hand steps (`docs/motion-pipeline-target.md`).
 
 ## Authority
 
@@ -34,7 +34,7 @@ One Linux CPU process tree:
 ```text
 vili-daemon.mjs          job intake, worker lifecycle, thread cap, nice 10
   kimodo-resident-worker.py   resident Kimodo model, one generation at a time
-    kimodo-text-encode.py     one child per request with cache misses, assembly B on CPU
+    kimodo-text-encode.py     one child per request with cache misses, on CPU
 ```
 
 Setup: `git submodule update --init`; in `vendor/CultLib`, `npm ci --ignore-scripts` and
@@ -59,7 +59,7 @@ The daemon starts the worker on the first job, on a port the worker binds itself
 and reports in its ready line, and respawns it after an exit. The worker runs at
 nice 10 with `torch` limited to `--threads` (also `OMP_NUM_THREADS` and
 `MKL_NUM_THREADS`), so a shared host keeps its other services. Its log is
-`<state>/logs/worker.log`. SIGTERM stops the whole tree.
+`<state>/logs/worker.log`. The daemon owns the whole worker process group: it is killed when the worker exits for any reason, on SIGTERM or SIGINT, and at start-up if a crashed daemon left one (`<state>/worker.pid`). A service unit should also own the tree (systemd `KillMode=control-group`).
 
 `POST /motion/generate` refuses any POST that carries an `Origin` or is not
 `application/json` with `403 cross-site`; no route answers a preflight.
@@ -143,16 +143,18 @@ worker answers Kimodo's encoder call from a CultCache store of float32 vectors,
 `<state>/embeddings/text-embeddings.cc` (`gamecult.vili.text_embedding.v0`, through
 the cultcache-py in `vendor/CultLib`). A vector's key is
 `sha256(encoderIdentity + newline + text)`. The identity names the three Hugging
-Face snapshot revisions, the encoder assembly, the device, dtype, the torch,
+Face snapshot revisions, the encoder assembly and prompt form, the device, dtype, the torch,
 transformers, peft and accelerate versions, the Kimodo commit and the sha256 of
 `kimodo-text-encode.py`, so a changed input misses instead of serving a stale
 vector. Thread count is provenance, recorded in the worker identity, not identity.
 
-The encoder is assembly B: the Llama 3 base with the MNTP adapter merged, then the
-supervised adapter, in bfloat16 on CPU. Kimodo's own loader never applies the MNTP
-weights under the pinned transformers; the A/B comparison is in
-`docs/research/vili-on-yggdrasil-cpu-2026-10.md`, which also holds the measured
-timings. Kimodo normalizes the prompt before encoding (`A person shrugs sadly.`),
+The encoder is the Llama 3 base with the MNTP adapter merged, then the supervised
+adapter, in bfloat16 on CPU, and `kimodo-text-encode.py` wraps every prompt in
+Llama 3 Instruct's chat header itself (`text_encoding.chat_header`, pooled after
+LLM2Vec's query marker), as Kimodo's LLM2Vec does when loaded from the repo ids. The identity names that prompt form.
+A fresh child vector matches Kimodo's own encoder from the repo ids
+(`test_text_encoding.ReferenceVector`, run on Yggdrasil). The measured timings are
+in `docs/research/vili-on-yggdrasil-cpu-2026-10.md`. Kimodo normalizes the prompt before encoding (`A person shrugs sadly.`),
 and the cache keys on that text. A request's misses go to one transient child that
 loads the encoder, encodes, writes its answer and exits, so the OS reclaims its
 RAM; hits never touch it. Each job carries the encoder record (hits, misses,
