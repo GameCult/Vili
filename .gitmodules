@@ -1,0 +1,3 @@
+[submodule "vendor/CultLib"]
+	path = vendor/CultLib
+	url = https://github.com/GameCult/CultLib.git

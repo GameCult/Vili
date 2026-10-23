@@ -3,68 +3,72 @@
 Vili is the GameCult Persona animation daemon.
 
 It owns the bridge from Persona performance intent to body-motion generation. Its
-first backend is Kimodo on Raven, running through Docker Engine inside
-`Ubuntu-24.04` WSL with NVIDIA GPU passthrough.
+backend is Kimodo, run by Vili's own daemon as a CPU-only Python process tree on
+Linux. Admission to Idunn on Yggdrasil is the next cut; until then nothing
+supervises Vili.
 
 ## Front Door
 
-- **Value:** a warm, supervised path from a text prompt to generated body motion. Vili runs Kimodo as a resident GPU worker on Raven and returns motion artifacts (`motion.npz`, optional BVH) for a job.
-- **Problem:** Personas and games need generated motion, but cold per-request container runs took about 195 seconds per 1 second clip, versus about 54 warm. One daemon owns job identity, worker lifecycle and artifact references so callers do not touch Docker, WSL or model state.
-- **Entry points:** `scripts/vili-daemon.mjs` (the daemon; `npm start`, `npm run health`, `npm run smoke`, `npm run provider`), `scripts/kimodo-resident-worker.py` (the resident worker), `POST /motion/generate` (see Motion Generation), `docs/verse-service-contract.md` and `docs/motion-pipeline-target.md`.
-- **Live:** the resident Kimodo worker on Raven, `POST /motion/generate`, `GET /smoke`, and the CultCache service store. It runs under a Raven scheduled task, not under Idunn. It has `motion.npz` and optional BVH output on the SOMA skeleton; there is no FBX export.
-- **Planned (target, 2026-10-20):** FBX animation export on the SOMA skeleton and a text-prompt-to-Unity-clip path with no hand steps, with each artifact recording prompt, constraints, seed and model. Retargeting stays with the consuming engine; see `docs/motion-pipeline-target.md`.
+- **Value:** a supervised path from a text prompt to generated body motion. The daemon spawns one resident Kimodo worker, caps its threads, and returns motion artifacts (`motion.npz`, optional BVH) for a job.
+- **Problem:** Personas and games need generated motion, but cold per-request model loads cost minutes. One daemon owns job identity, worker lifecycle, the thread budget and artifact references, so callers touch no model state.
+- **Entry points:** `scripts/vili-daemon.mjs` (the daemon; `npm start`, `npm run health`, `npm test`), `scripts/kimodo-resident-worker.py` (the worker it spawns), `scripts/kimodo-text-encode.py` (the one-shot encoder child), `POST /motion/generate` (see Motion Generation), `docs/verse-service-contract.md` and `docs/motion-pipeline-target.md`.
+- **Live:** the process tree below, run by hand: `POST /motion/generate`, `GET /health`, `GET /operator-state`, and the CultCache service store. It produces `motion.npz` and optional BVH on the SOMA skeleton; there is no FBX export.
+- **Planned:** admission to Idunn on Yggdrasil with a locked virtual environment, then FBX export and a text-prompt-to-Unity-clip path with no hand steps (`docs/motion-pipeline-target.md`).
 
 ## Authority
 
-- Vili owns animation job intake, Kimodo runtime checks, Kimodo resident worker
-  lifecycle, generated motion artifact references, and its operator/provider
-  surface.
+- Vili owns animation job intake, the worker process lifecycle, and generated
+  motion artifact references.
 - Personas and Weksa may propose performance intent, gesture prompts, and
   constraints.
 - Kimodo owns motion synthesis.
 - Future renderers own retargeting, playback, facial performance, camera, and
   lip sync.
 - Odin discovers Vili; Odin does not own Vili's state.
-- Vili is started at boot by its scheduled task on Raven today; nothing restarts it after a crash, and Idunn does not manage it until its admission is ruled (deferred until RPS has its clips). Idunn would not own animation decisions.
+- Operator surfaces wait for Thing 2; today Vili publishes typed state and plain HTTP.
 
 ## Local Runtime
 
-On Raven:
-
-```powershell
-scripts\restart-vili-daemon.cmd
-```
-
-Default compatibility endpoint:
+One Linux CPU process tree:
 
 ```text
-http://10.77.0.4:8824
+vili-daemon.mjs          job intake, worker lifecycle, thread cap, nice 10
+  kimodo-resident-worker.py   resident Kimodo model, one generation at a time
+    kimodo-text-encode.py     one child per request with cache misses, on CPU
 ```
 
-Vili is not an Idunn target today. Its lifecycle is the `GameCult\Vili`
-scheduled task on Raven, and `GET /health` is an operator lowering. Admission
-to Idunn is motion-pipeline:question:vili-under-idunn.
-
-Vili also writes daemon-owned service state to:
+Setup: `git submodule update --init`; in `vendor/CultLib`, `npm ci --ignore-scripts` and
+`npm run build --workspace=packages/cultcache-ts`; then `npm ci` here. The worker
+needs a Python environment with Kimodo's pins and Kimodo itself importable, and a
+Hugging Face cache (`<models root>/hub`) holding the Llama 3 base, both LLM2Vec
+adapters and the Kimodo checkpoint. Everything runs offline.
 
 ```text
-.vili\vili.service.cc
+node scripts/vili-daemon.mjs --python <python> --models-root <hf home> --kimodo-commit <sha> --python-env <env id> [--threads 8]
 ```
 
-That CultCache store owns the provider advertisement, operator state, Eve
-surface, command boundary, and transport profile. The adjacent JSON files are
-compatibility exports for tools that have not learned the `.cc` store yet.
+Flags, each with an environment twin: `--host` (`VILI_DAEMON_HOST`, 127.0.0.1),
+`--port` (`VILI_DAEMON_PORT`, 8824), `--state-root` (`VILI_STATE_ROOT`, `.vili`),
+`--python` (`VILI_PYTHON`), `--worker-entry` (`VILI_WORKER_ENTRY`, the test seam),
+`--models-root` (`VILI_MODELS_ROOT`), `--threads` (`VILI_THREADS`, 1 to 16, default
+8), `--kimodo-commit` (`VILI_KIMODO_COMMIT`), `--python-env` (`VILI_PYTHON_ENV`, the
+environment's identity). A generate request without a models root, Kimodo commit
+and Python environment id gets `503 worker-unconfigured` before anything spawns.
 
-Important routes:
+The daemon starts the worker on the first job, on a port the worker binds itself
+and reports in its ready line, and respawns it after an exit. The worker runs at
+nice 10 with `torch` limited to `--threads` (also `OMP_NUM_THREADS` and
+`MKL_NUM_THREADS`), so a shared host keeps its other services. Its log is
+`<state>/logs/worker.log`. The daemon owns the whole worker process group: it is killed when the worker exits for any reason, on SIGTERM or SIGINT, and at start-up if a crashed daemon left one (`<state>/worker.pid`). A service unit should also own the tree (systemd `KillMode=control-group`).
 
-- `GET /health`
-- `GET /provider-advertisement`
-- `GET /operator-state`
-- `GET /eve/operator`
-- `GET /eve/deck/providers`
-- `WS /eve/deck/vili.animation`
-- `GET /smoke`
-- `POST /motion/generate`
+`POST /motion/generate` refuses any POST that carries an `Origin` or is not
+`application/json` with `403 cross-site`; no route answers a preflight.
+
+Vili writes daemon-owned state to `.vili/vili.service.cc`: operator state, the
+command boundary and the transport profile. Jobs are `.vili/jobs/<jobId>.json`,
+artifacts `.vili/artifacts/<jobId>/`.
+
+Routes: `GET /health`, `GET /operator-state`, `POST /motion/generate`.
 
 ## Motion Generation
 
@@ -111,14 +115,14 @@ Supported request fields:
 
 - `prompt` / `utterance` plus `duration` / `durationSeconds`
 - `texts` plus `durations`, or a full `meta` object
-- `inputFolder` / `input_folder` for a container-visible Kimodo input folder
+- `inputFolder` / `input_folder` for a Kimodo input folder on the worker host
   with `meta.json` and optional `constraints.json`
 - `model`; changing the requested model restarts the single resident worker
 - `diffusionSteps` / `diffusion_steps`
 - `numSamples` / `num_samples`
 - `numTransitionFrames` / `num_transition_frames`
 - `constraints` as an object/list, or `constraints`, `constraintsPath`, or
-  `constraints_path` as a container-visible path
+  `constraints_path` as a path on the worker host
 - `seed`
 - `cfg`, `cfgType` / `cfg_type`, `cfgWeight` / `cfg_weight`
 - `bvh`, `bvhStandardTpose` / `bvh_standard_tpose`
@@ -134,41 +138,25 @@ exports CSV when that model is resident.
 
 ## Current Runtime State
 
-Raven has a Hugging Face token installed at
-`/root/.cache/huggingface/token` inside `Ubuntu-24.04`. Vili mounts that token
-read-only into Kimodo containers and passes the standard Hugging Face token
-environment variables.
-
-Vili keeps Kimodo warm through a resident worker container named
-`vili-kimodo-worker`. The worker loads the model once, exposes `/health` and
-`/generate` inside WSL on `127.0.0.1:8825`, and serializes generation through
-the loaded model. Because Raven's Docker Engine runs inside WSL, Vili also
-keeps a tiny WSL sleep-loop alive while the worker is resident so the Docker
-substrate does not disappear underneath the model. `GET /health` observes
-worker state without launching model load. `GET /smoke` verifies the backend
-and starts the resident worker when it is absent.
-
 Kimodo's 8B text encoder (LLM2Vec, Llama 3) never lives in the worker. The
 worker answers Kimodo's encoder call from a CultCache store of float32 vectors,
-`.vili/embeddings/text-embeddings.cc` (`gamecult.vili.text_embedding.v0`, written
-through the cultcache-py checkout mounted from `E:\Projects\CultLib`). A vector's
-key is `sha256(encoderIdentity + newline + text)`, and the identity names the three
-Hugging Face snapshot revisions, bfloat16, the transformers and peft versions and
-the Kimodo commit, so a changed input misses instead of serving a stale vector.
-Kimodo normalizes the prompt before encoding (`A person shrugs sadly.`), and the
-cache keys on that text. A request's misses go to one transient child,
-`scripts/kimodo-text-encode.py`: it loads the encoder in bf16 on the GPU, with the
-layers that do not fit in free VRAM held in RAM, encodes, writes its answer and
-exits, so the OS reclaims its RAM and VRAM. It refuses with a typed `gpu-busy`
-below 2 GiB of free VRAM and has no CPU fallback; hits never touch it. Each
-`/motion/generate` job carries the encoder record (hits, misses, seconds, vector
-hashes) and the worker identity. `GET /health` shows the identity and the stored
-count.
+`<state>/embeddings/text-embeddings.cc` (`gamecult.vili.text_embedding.v0`, through
+the cultcache-py in `vendor/CultLib`). A vector's key is
+`sha256(encoderIdentity + newline + text)`. The identity names the three Hugging
+Face snapshot revisions, the encoder assembly and prompt form, the device, dtype, the torch,
+transformers, peft and accelerate versions, the Kimodo commit and the sha256 of
+`kimodo-text-encode.py`, so a changed input misses instead of serving a stale
+vector. Thread count is provenance, recorded in the worker identity, not identity.
 
-Measured on Raven on `2026-10-22`, for a 2 second clip at 20 diffusion steps:
-the worker is healthy 29 seconds after `docker rm` (was 179) and rests at 2.3 GiB
-resident (was 10.4 GiB, with 5.8 GB swapped). A cache miss takes 59 to 103
-seconds, the encode being nearly all of it (the 103 was with the model files cold
-in the page cache); the CPU encoder took 316 to 376. A hit takes under one
-second. The child peaks at 14.1 GiB of VRAM, so a miss needs almost the whole
-16 GB card.
+The encoder is the Llama 3 base with the MNTP adapter merged, then the supervised
+adapter, in bfloat16 on CPU, and `kimodo-text-encode.py` wraps every prompt in
+Llama 3 Instruct's chat header itself (`text_encoding.chat_header`, pooled after
+LLM2Vec's query marker), as Kimodo's LLM2Vec does when loaded from the repo ids. The identity names that prompt form.
+A fresh child vector matches Kimodo's own encoder from the repo ids
+(`test_text_encoding.ReferenceVector`, run on Yggdrasil). The measured timings are
+in `docs/research/vili-on-yggdrasil-cpu-2026-10.md`. Kimodo normalizes the prompt before encoding (`A person shrugs sadly.`),
+and the cache keys on that text. A request's misses go to one transient child that
+loads the encoder, encodes, writes its answer and exits, so the OS reclaims its
+RAM; hits never touch it. Each job carries the encoder record (hits, misses,
+seconds, vector hashes) and the worker identity. The cache starts empty on a new
+host: vectors from another assembly or device are never copied in.

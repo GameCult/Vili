@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import http from "node:http";
+import os from "node:os";
+import { closeSync, openSync, readdirSync, readFileSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { execFile } from "node:child_process";
-import { WebSocketServer } from "ws";
+import { spawn } from "node:child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -16,37 +18,9 @@ const {
   defineDocumentType,
 } = require("cultcache-ts");
 const projectRoot = path.resolve(__dirname, "..");
-const ravenBaseUrl = process.env.VILI_PUBLIC_BASE_URL || "http://10.77.0.4:8824";
-const ravenDeckUrl = process.env.VILI_PUBLIC_DECK_URL || "ws://10.77.0.4:8824/eve/deck";
 const providerId = "vili.animation";
 const viliStoreFileName = "vili.service.cc";
-const kimodoWorkerName = process.env.VILI_KIMODO_WORKER_NAME || "vili-kimodo-worker";
-const kimodoWorkerPort = Number(process.env.VILI_KIMODO_WORKER_PORT || 8825);
-const kimodoWorkerUrl = `http://127.0.0.1:${kimodoWorkerPort}`;
-const dockerHuggingFaceEnv = [
-  "export HF_TOKEN=\"$(cat /root/.cache/huggingface/token 2>/dev/null || true)\"",
-  "export HUGGING_FACE_HUB_TOKEN=\"$HF_TOKEN\"",
-].join("; ");
-const dockerHuggingFaceArgs = [
-  "-e HF_TOKEN",
-  "-e HUGGING_FACE_HUB_TOKEN",
-  "-v /root/.cache/huggingface:/root/.cache/huggingface",
-].join(" ");
 const objectSchema = { parse: (value) => value };
-const providerAdvertisementDefinition = defineDocumentType({
-  type: "gamecult.eve.provider_advertisement",
-  schemaName: "gamecult.eve.provider_advertisement",
-  schemaId: "gamecult.eve.provider_advertisement.v1",
-  schemaVersion: "gamecult.eve.provider_advertisement.v1",
-  name: (value) => value?.providerId || "provider",
-  schema: objectSchema,
-  members: [
-    { slot: 0, memberName: "providerId", typeName: "string", isName: true },
-    { slot: 1, memberName: "title", typeName: "string" },
-    { slot: 2, memberName: "verseId", typeName: "string" },
-    { slot: 3, memberName: "updatedAt", typeName: "string" },
-  ],
-});
 const operatorStateDefinition = defineDocumentType({
   type: "gamecult.vili.operator_state",
   schemaName: "gamecult.vili.operator_state",
@@ -59,20 +33,6 @@ const operatorStateDefinition = defineDocumentType({
     { slot: 1, memberName: "providerId", typeName: "string" },
     { slot: 2, memberName: "updatedAt", typeName: "string" },
     { slot: 3, memberName: "backend", typeName: "object" },
-  ],
-});
-const eveSurfaceDefinition = defineDocumentType({
-  type: "gamecult.eve.surface_state",
-  schemaName: "gamecult.eve.surface_state",
-  schemaId: "gamecult.eve.surface_state.v1",
-  schemaVersion: "gamecult.eve.surface_state.v1",
-  name: (value) => value?.providerId || "surface",
-  schema: objectSchema,
-  members: [
-    { slot: 0, memberName: "providerId", typeName: "string", isName: true },
-    { slot: 1, memberName: "title", typeName: "string" },
-    { slot: 2, memberName: "updatedAt", typeName: "string" },
-    { slot: 3, memberName: "surface", typeName: "object" },
   ],
 });
 const commandBoundaryDefinition = defineDocumentType({
@@ -106,20 +66,26 @@ const transportProfileDefinition = defineDocumentType({
   ],
 });
 const viliDocumentRegistry = defineDocumentRegistry(
-  providerAdvertisementDefinition,
   operatorStateDefinition,
-  eveSurfaceDefinition,
   commandBoundaryDefinition,
   transportProfileDefinition,
 );
 
+const MAX_THREADS = 16;
+
 function parseArgs(argv) {
+  const env = process.env;
   const args = {
-    host: process.env.VILI_DAEMON_HOST || "127.0.0.1",
-    port: Number(process.env.VILI_DAEMON_PORT || 8824),
-    stateRoot: process.env.VILI_STATE_ROOT || path.join(projectRoot, ".vili"),
+    host: env.VILI_DAEMON_HOST || "127.0.0.1",
+    port: Number(env.VILI_DAEMON_PORT || 8824),
+    stateRoot: path.resolve(env.VILI_STATE_ROOT || path.join(projectRoot, ".vili")),
+    python: env.VILI_PYTHON || "python3",
+    workerEntry: path.resolve(env.VILI_WORKER_ENTRY || path.join(__dirname, "kimodo-resident-worker.py")),
+    modelsRoot: env.VILI_MODELS_ROOT || "",
+    threads: env.VILI_THREADS || "8",
+    kimodoCommit: env.VILI_KIMODO_COMMIT || "",
+    pythonEnv: env.VILI_PYTHON_ENV || "",
     health: false,
-    printProviderAdvertisement: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -127,53 +93,29 @@ function parseArgs(argv) {
     if (arg === "--host") args.host = argv[++index];
     else if (arg === "--port") args.port = Number(argv[++index]);
     else if (arg === "--state-root") args.stateRoot = path.resolve(argv[++index]);
+    else if (arg === "--python") args.python = argv[++index];
+    else if (arg === "--worker-entry") args.workerEntry = path.resolve(argv[++index]);
+    else if (arg === "--models-root") args.modelsRoot = argv[++index];
+    else if (arg === "--threads") args.threads = argv[++index];
+    else if (arg === "--kimodo-commit") args.kimodoCommit = argv[++index];
+    else if (arg === "--python-env") args.pythonEnv = argv[++index];
     else if (arg === "--health") args.health = true;
-    else if (arg === "--print-provider-advertisement") args.printProviderAdvertisement = true;
   }
+  if (!/^[0-9]{1,2}$/.test(String(args.threads)) || Number(args.threads) < 1 || Number(args.threads) > MAX_THREADS) {
+    console.error(`threads must be an integer from 1 to ${MAX_THREADS}`);
+    process.exit(2);
+  }
+  args.threads = Number(args.threads);
+  if (args.modelsRoot) args.modelsRoot = path.resolve(args.modelsRoot);
   return args;
 }
 
 const args = parseArgs(process.argv.slice(2));
 const startedAt = new Date().toISOString();
-let backendStatus = {
-  checkedAt: null,
-  dockerImage: "unknown",
-  nvidiaRuntime: "unknown",
-  huggingFaceToken: "unknown",
-  kimodoHelp: "unknown",
-  kimodoWorker: "unknown",
-  kimodoWorkerDetail: null,
-  lastError: null,
-};
 
-function run(command, commandArgs, options = {}) {
-  return new Promise((resolve) => {
-    execFile(command, commandArgs, {
-      cwd: projectRoot,
-      timeout: options.timeout ?? 20000,
-      env: { ...process.env, ...(options.env || {}) },
-      windowsHide: true,
-      maxBuffer: 1024 * 1024 * 4,
-    }, (error, stdout, stderr) => {
-      resolve({
-        ok: !error,
-        code: error?.code ?? 0,
-        signal: error?.signal ?? null,
-        stdout: String(stdout || "").trim(),
-        stderr: String(stderr || "").trim(),
-        error: error ? String(error.message || error) : null,
-      });
-    });
-  });
-}
-
-function wsl(script, options = {}) {
-  return run("wsl.exe", ["-d", "Ubuntu-24.04", "-u", "root", "--", "bash", "-lc", script], options);
-}
-
-function shQuote(value) {
-  return `'${String(value).replaceAll("'", "'\\''")}'`;
-}
+// The worker child. Display state only: nothing reads `worker` to decide anything but ensureWorker.
+const worker = { state: "stopped", proc: null, pid: null, port: null, servedModels: [], lastError: null };
+let starting = null;
 
 function firstDefined(...values) {
   return values.find((value) => value !== undefined && value !== null);
@@ -183,22 +125,11 @@ function boolValue(value) {
   return value === true || String(value).toLowerCase() === "true" || String(value) === "1";
 }
 
-async function wslJson(script, options = {}) {
-  const result = await wsl(script, options);
-  if (!result.ok) return { ...result, body: null };
-  try {
-    return { ...result, body: JSON.parse(result.stdout) };
-  } catch (error) {
-    return { ...result, ok: false, body: null, error: `Invalid JSON: ${error.message}`, stderr: result.stderr };
-  }
-}
-
 function json(response, statusCode, body) {
   const payload = JSON.stringify(body, null, 2);
   response.writeHead(statusCode, {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
-    "access-control-allow-origin": "*",
   });
   response.end(payload);
 }
@@ -207,38 +138,31 @@ function text(response, statusCode, body) {
   response.writeHead(statusCode, {
     "content-type": "text/plain; charset=utf-8",
     "cache-control": "no-store",
-    "access-control-allow-origin": "*",
   });
   response.end(body);
 }
 
-function providerAdvertisement() {
+// A browser page can POST to localhost; a browser cannot send application/json cross-site without a preflight,
+// and no route answers a preflight. So a POST that carries an Origin, or is not JSON, never reaches the body.
+function refuseCrossSite(request, response) {
+  const contentType = String(request.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
+  if (request.headers.origin !== undefined || contentType !== "application/json") {
+    json(response, 403, { ok: false, code: "cross-site" });
+    return true;
+  }
+  return false;
+}
+
+function backendStatus() {
   return {
-    schema: "gamecult.eve.provider_advertisement.v1",
-    providerId,
-    title: "Vili Animation",
-    description: "Persona animation and Kimodo motion generation daemon on Raven.",
-    canonicalService: "asgard.vili",
-    locatedService: "asgard.raven.vili",
-    verseId: "raven.local",
-    cultMeshAddress: "asgard.raven.vili/eve/operator",
-    updatedAt: new Date().toISOString(),
-    endpoints: {
-      http: ravenBaseUrl,
-      health: `${ravenBaseUrl}/health`,
-      smoke: `${ravenBaseUrl}/smoke`,
-      providerAdvertisement: `${ravenBaseUrl}/provider-advertisement`,
-      operatorState: `${ravenBaseUrl}/operator-state`,
-      operatorSurface: `${ravenBaseUrl}/eve/operator`,
-      deckBroker: ravenDeckUrl,
-      providerDeck: `${ravenDeckUrl}/${providerId}`,
-    },
-    capabilities: [
-      "kimodo.motion.generate",
-      "persona.performance.intent",
-      "eve.operator.surface",
-      "cultmesh.provider.discovery",
-    ],
+    state: worker.state,
+    pid: worker.pid,
+    port: worker.port,
+    threads: args.threads,
+    pythonEnv: args.pythonEnv || null,
+    kimodoCommit: args.kimodoCommit || null,
+    modelsRoot: args.modelsRoot || null,
+    lastError: worker.lastError,
   };
 }
 
@@ -247,18 +171,15 @@ function operatorState() {
     schema: "gamecult.vili.operator_state.v0",
     service: "vili",
     providerId,
-    verseId: "raven.local",
-    host: "raven",
+    host: os.hostname(),
     startedAt,
     updatedAt: new Date().toISOString(),
-    backend: backendStatus,
+    backend: backendStatus(),
     authority: {
       owns: [
         "animation job intake",
-        "Kimodo runtime checks",
-        "Kimodo resident worker lifecycle",
+        "worker process lifecycle",
         "motion artifact references",
-        "Vili provider and operator surfaces",
       ],
       doesNotOwn: [
         "Persona speech generation",
@@ -269,11 +190,7 @@ function operatorState() {
     },
     routes: {
       health: "/health",
-      providerAdvertisement: "/provider-advertisement",
       operatorState: "/operator-state",
-      operatorSurface: "/eve/operator",
-      deckProviders: "/eve/deck/providers",
-      smoke: "/smoke",
       generate: "/motion/generate",
     },
   };
@@ -293,15 +210,10 @@ function commandBoundary() {
         owns: [
           "animation job identity",
           "request persistence",
-          "Kimodo resident worker lifecycle",
+          "worker process lifecycle",
           "timeout handling",
           "motion artifact references",
         ],
-      },
-      smoke: {
-        method: "GET",
-        path: "/smoke",
-        owns: ["backend readiness proof", "resident worker warmup"],
       },
       liveness: {
         method: "GET",
@@ -311,7 +223,7 @@ function commandBoundary() {
       },
     },
     forbiddenAuthority:
-      "HTTP health, WebSocket decks, and JSON sidecars are compatibility/operator lowerings; they do not own daemon health or provider truth when CultCache/CultNet records exist.",
+      "HTTP health and the operator-state projection are compatibility lowerings; they do not own daemon health or provider truth when CultCache/CultNet records exist.",
   };
 }
 
@@ -321,178 +233,226 @@ function transportProfile() {
     profileId: "vili",
     daemonId: "vili",
     targetTransport: "cultnet.transport.rudp.v0",
-    currentTransport: "CultCache local state + compatibility HTTP/WS lowerings",
+    currentTransport: "CultCache local state + compatibility HTTP lowerings",
     state: "local-cultcache-only",
-    providerAdvertisementSchema: "gamecult.eve.provider_advertisement.v1",
     operatorStateSchema: "gamecult.vili.operator_state.v1",
     commandBoundarySchema: "gamecult.vili.command_boundary.v1",
-    compatibilityMechanisms: [
-      `${ravenBaseUrl}/health`,
-      `${ravenBaseUrl}/provider-advertisement`,
-      `${ravenDeckUrl}/${providerId}`,
-    ],
+    compatibilityMechanisms: ["/health", "/operator-state"],
     cutLine:
-      "Vili owns typed provider, operator, command, and transport state. HTTP/WS/JSON projections are lowerings until Odin consumes Vili provider records over CultNet/RUDP.",
+      "Vili owns typed operator, command, and transport state. HTTP projections are lowerings until Odin consumes Vili records over CultNet/RUDP.",
     updatedAt: new Date().toISOString(),
-  };
-}
-
-function eveSurface() {
-  const state = operatorState();
-  return {
-    schema: "gamecult.eve.surface.v1",
-    providerId,
-    title: "Vili Animation",
-    updatedAt: state.updatedAt,
-    surface: {
-      root: {
-        type: "panel",
-        title: "Vili Animation",
-        children: [
-          { type: "stat", label: "Host", value: "Raven" },
-          { type: "stat", label: "Verse", value: "raven.local" },
-          { type: "stat", label: "Docker image", value: state.backend.dockerImage },
-          { type: "stat", label: "NVIDIA runtime", value: state.backend.nvidiaRuntime },
-          { type: "stat", label: "Kimodo", value: state.backend.kimodoHelp },
-          { type: "stat", label: "Kimodo worker", value: state.backend.kimodoWorker },
-          { type: "stat", label: "HF token", value: state.backend.huggingFaceToken },
-          { type: "command", label: "Smoke", method: "GET", href: `${ravenBaseUrl}/smoke` },
-          { type: "command", label: "Generate motion", method: "POST", href: `${ravenBaseUrl}/motion/generate` },
-        ],
-      },
-    },
-    state,
   };
 }
 
 async function persistSurfaces() {
   await mkdir(args.stateRoot, { recursive: true });
-  await persistCultCacheSurfaces();
-  await writeFile(path.join(args.stateRoot, "vili-daemon.pid"), `${process.pid}\n`);
-  await writeFile(path.join(args.stateRoot, "provider-advertisement.json"), JSON.stringify(providerAdvertisement(), null, 2));
-  await writeFile(path.join(args.stateRoot, "operator-state.json"), JSON.stringify(operatorState(), null, 2));
-  await writeFile(path.join(args.stateRoot, "eve-operator-surface.json"), JSON.stringify(eveSurface(), null, 2));
-  await writeFile(path.join(args.stateRoot, "command-boundary.json"), JSON.stringify(commandBoundary(), null, 2));
-  await writeFile(path.join(args.stateRoot, "transport-profile.json"), JSON.stringify(transportProfile(), null, 2));
-}
-
-async function persistCultCacheSurfaces() {
   const cache = CultCache.builder()
     .withRegistry(viliDocumentRegistry)
     .withGenericStore(new SingleFileMessagePackBackingStore(path.join(args.stateRoot, viliStoreFileName)))
     .build();
-  await cache.put(providerAdvertisementDefinition, providerId, providerAdvertisement());
   await cache.put(operatorStateDefinition, "vili", operatorState());
-  await cache.put(eveSurfaceDefinition, providerId, eveSurface());
   await cache.put(commandBoundaryDefinition, "vili", commandBoundary());
   await cache.put(transportProfileDefinition, "vili", transportProfile());
 }
 
-async function refreshBackendStatus({ includeKimodoHelp = false } = {}) {
-  const docker = await wsl([
-    "set -e",
-    "service docker start >/dev/null 2>&1 || true",
-    "docker images gamecult/kimodo:latest --format '{{.Repository}}:{{.Tag}}' | head -n 1",
-  ].join("; "), { timeout: 20000 });
-
-  let nvidia = await wsl([
-    "set -e",
-    "service docker start >/dev/null 2>&1 || true",
-    "docker info --format '{{json .Runtimes}}' | grep -q nvidia && echo configured || echo missing",
-  ].join("; "), { timeout: 20000 });
-
-  const token = await wsl("test -f /root/.cache/huggingface/token && echo present || echo missing", { timeout: 10000 });
-  const worker = await kimodoWorkerHealth(20000);
-  let help = { ok: true, stdout: backendStatus.kimodoHelp === "ok" ? "ok" : "not checked", stderr: "" };
-  if (includeKimodoHelp) {
-    nvidia = await wsl([
-      "set -e",
-      "service docker start >/dev/null 2>&1 || true",
-      "docker run --rm --runtime=nvidia --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1",
-    ].join("; "), { timeout: 45000 });
-    help = await wsl([
-      "set -e",
-      "service docker start >/dev/null 2>&1 || true",
-      dockerHuggingFaceEnv,
-      `docker run --rm --runtime=nvidia --gpus all ${dockerHuggingFaceArgs} gamecult/kimodo:latest kimodo_gen --help | sed -n '1,6p'`,
-    ].join("; "), { timeout: 60000 });
-  }
-
-  backendStatus = {
-    checkedAt: new Date().toISOString(),
-    dockerImage: docker.ok && docker.stdout ? docker.stdout : "missing",
-    nvidiaRuntime: nvidia.ok && nvidia.stdout ? nvidia.stdout : "unavailable",
-    huggingFaceToken: token.ok ? token.stdout : "unknown",
-    kimodoHelp: includeKimodoHelp ? (help.ok ? "ok" : "failed") : backendStatus.kimodoHelp,
-    kimodoWorker: worker.ok && worker.body?.ok ? "resident" : "not running",
-    kimodoWorkerDetail: worker.body || null,
-    lastError: [docker, nvidia, token, help].find((result) => !result.ok)?.stderr || null,
+// The whole child environment, in one place. Nothing else from process.env reaches the worker.
+function childEnv() {
+  const threads = String(args.threads);
+  const env = {
+    HF_HOME: args.modelsRoot,
+    HF_HUB_OFFLINE: "1",
+    TRANSFORMERS_OFFLINE: "1",
+    VILI_EMBEDDINGS_DIR: path.join(args.stateRoot, "embeddings"),
+    VILI_THREADS: threads,
+    OMP_NUM_THREADS: threads,
+    MKL_NUM_THREADS: threads,
+    PYTHONPATH: path.join(projectRoot, "vendor", "CultLib", "packages", "cultcache-py", "src"),
+    PYTHONDONTWRITEBYTECODE: "1",
+    PYTHONUNBUFFERED: "1",
+    VILI_KIMODO_COMMIT: args.kimodoCommit,
+    VILI_PYTHON_ENV: args.pythonEnv,
   };
-  await persistSurfaces();
-  return { docker, nvidia, token, help, backendStatus };
+  for (const name of ["PATH", "HOME", "LANG"]) {
+    if (process.env[name] !== undefined) env[name] = process.env[name];
+  }
+  return env;
 }
 
-async function kimodoWorkerHealth(timeout = 10000) {
-  return wslJson(`curl -fsS --max-time ${Math.ceil(timeout / 1000)} ${shQuote(`${kimodoWorkerUrl}/health`)}`, { timeout });
+function workerUnconfigured() {
+  return !args.modelsRoot || !args.kimodoCommit || !args.pythonEnv;
 }
 
-async function startKimodoWorker({ model = null } = {}) {
-  const script = [
-    "set -e",
-    "service docker start >/dev/null 2>&1 || true",
-    dockerHuggingFaceEnv,
-    "mkdir -p /mnt/e/Projects/Vili/.vili/artifacts /mnt/e/Projects/Vili/.vili/logs /mnt/e/Projects/Vili/.vili/embeddings",
-    "export VILI_KIMODO_COMMIT=\"$(git -C /opt/gamecult/kimodo rev-parse HEAD)\"",
-    "export VILI_KIMODO_IMAGE=\"$(docker image inspect --format '{{.Id}}' gamecult/kimodo:latest)\"",
-    "if ! kill -0 $(cat /tmp/vili-wsl-keepalive.pid 2>/dev/null) >/dev/null 2>&1; then nohup bash -c 'while true; do sleep 3600; done' >/tmp/vili-wsl-keepalive.log 2>&1 & echo $! >/tmp/vili-wsl-keepalive.pid; fi",
-    `if docker ps --format '{{.Names}}' | grep -qx ${shQuote(kimodoWorkerName)}; then echo running; exit 0; fi`,
-    `docker rm -f ${shQuote(kimodoWorkerName)} >/dev/null 2>&1 || true`,
-    [
-      "docker run -d",
-      `--name ${shQuote(kimodoWorkerName)}`,
-      "--runtime=nvidia --gpus all",
-      `-p 127.0.0.1:${kimodoWorkerPort}:${kimodoWorkerPort}`,
-      dockerHuggingFaceArgs,
-      "-e VILI_KIMODO_COMMIT -e VILI_KIMODO_IMAGE",
-      "-e PYTHONPATH=/opt/cultlib/cultcache-py",
-      "-v /mnt/e/Projects/Vili/scripts:/opt/vili:ro",
-      "-v /mnt/e/Projects/CultLib/packages/cultcache-py/src:/opt/cultlib/cultcache-py:ro",
-      "-v /mnt/e/Projects/Vili/.vili/embeddings:/vili-embeddings",
-      "-v /mnt/e/Projects/Vili/.vili/artifacts:/outputs",
-      "gamecult/kimodo:latest",
-      "python",
-      "/opt/vili/kimodo-resident-worker.py",
-      `--port ${kimodoWorkerPort}`,
-      model ? `--model ${shQuote(model)}` : "",
-    ].join(" "),
-  ].join("; ");
-  return wsl(script, { timeout: 30000 });
+function waitForExit(proc, timeoutMs) {
+  return new Promise((resolve) => {
+    if (proc.exitCode !== null || proc.signalCode !== null) return resolve(true);
+    const timer = setTimeout(() => resolve(false), timeoutMs);
+    proc.once("exit", () => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
 }
 
-async function ensureKimodoWorker({ timeoutMs = 1000 * 60 * 8, model = null } = {}) {
-  const health = await kimodoWorkerHealth(10000);
-  if (health.ok && health.body?.ok) {
-    if (!model || health.body.model === model || health.body.displayModel === model) return health;
-    await wsl(`docker rm -f ${shQuote(kimodoWorkerName)} >/dev/null 2>&1 || true`, { timeout: 30000 });
+// The worker leads its own process group (its pid is the group id), so the encoder child it spawns is in the group
+// too. The daemon owns the whole group: it is killed when the worker exits for any reason, on a requested stop, and
+// at the next start if a crashed daemon left it behind (reclaimStrayWorker). Under systemd, KillMode=control-group
+// is the same ownership from outside the process.
+const workerPidFile = () => path.join(args.stateRoot, "worker.pid");
+
+function killGroup(pgid, signal) {
+  try {
+    process.kill(-pgid, signal);
+  } catch {
+    // no such group
+  }
+}
+
+function forgetWorkerPid(pid) {
+  try {
+    if (readFileSync(workerPidFile(), "utf8").trim() === String(pid)) unlinkSync(workerPidFile());
+  } catch {
+    // no pid file, or another worker's
+  }
+}
+
+// A worker left by a crashed daemon: the pid file names its group, and the group is ours only if some member
+// still carries this state root's embeddings directory in its environment (the pid may have been reused).
+function reclaimStrayWorker() {
+  let pgid;
+  try {
+    pgid = Number(readFileSync(workerPidFile(), "utf8").trim());
+  } catch {
+    return;
+  }
+  const marker = `VILI_EMBEDDINGS_DIR=${path.join(args.stateRoot, "embeddings")}`;
+  let ours = false;
+  try {
+    for (const entry of readdirSync("/proc")) {
+      if (!/^\d+$/.test(entry)) continue;
+      try {
+        const stat = readFileSync(`/proc/${entry}/stat`, "utf8");
+        const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+        if (Number(fields[2]) !== pgid) continue;
+        if (readFileSync(`/proc/${entry}/environ`, "utf8").split("\0").includes(marker)) ours = true;
+      } catch {
+        // the process exited while we looked
+      }
+    }
+  } catch {
+    // no /proc: nothing can be verified, so nothing is killed
+  }
+  if (ours) killGroup(pgid, "SIGKILL");
+  try {
+    unlinkSync(workerPidFile());
+  } catch {
+    // already gone
+  }
+}
+
+async function stopWorker() {
+  const proc = worker.proc;
+  if (!proc || proc.pid === undefined) return;
+  worker.state = "stopped";
+  for (const signal of ["SIGTERM", "SIGKILL"]) {
+    killGroup(proc.pid, signal);
+    if (await waitForExit(proc, signal === "SIGTERM" ? 10000 : 5000)) break;
+  }
+}
+
+async function startWorker(model, timeoutMs) {
+  await mkdir(path.join(args.stateRoot, "logs"), { recursive: true });
+  await mkdir(path.join(args.stateRoot, "embeddings"), { recursive: true });
+  const logFd = openSync(path.join(args.stateRoot, "logs", "worker.log"), "a");
+  const argv = [args.workerEntry, "--host", "127.0.0.1", "--port", "0"];
+  if (model) argv.push("--model", model);
+  const proc = spawn(args.python, argv, {
+    cwd: __dirname,
+    env: childEnv(),
+    stdio: ["ignore", "pipe", logFd],
+    shell: false,
+    detached: true,
+  });
+  closeSync(logFd);
+  if (proc.pid !== undefined) {
+    writeFileSync(workerPidFile(), `${proc.pid}\n`);
+    proc.once("exit", () => {
+      killGroup(proc.pid, "SIGKILL"); // whatever the worker left running, an encoder child included
+      forgetWorkerPid(proc.pid);
+    });
+  }
+  Object.assign(worker, { state: "starting", proc, pid: proc.pid ?? null, port: null, servedModels: [], lastError: null });
+  const exited = new Promise((resolve) => {
+    proc.once("error", () => resolve("the worker could not be spawned"));
+    proc.once("exit", (code, signal) => resolve(`the worker exited (${signal ?? `code ${code}`})`));
+  });
+  exited.then((reason) => {
+    if (worker.proc !== proc) return;
+    Object.assign(worker, { state: "stopped", proc: null, pid: null, port: null, lastError: worker.state === "stopped" ? worker.lastError : reason });
+  });
+
+  const fail = async (reason) => {
+    worker.lastError = reason;
+    await stopWorker();
+    Object.assign(worker, { state: "failed", proc: null, pid: null, port: null, lastError: reason });
+    throw new Error(reason);
+  };
+
+  if (proc.pid === undefined) await fail(await exited);
+  try {
+    os.setPriority(proc.pid, 10);
+  } catch {
+    await fail("the worker priority could not be lowered");
   }
 
-  const started = await startKimodoWorker({ model });
-  if (!started.ok) return started;
-
+  // Stdout lines are the worker's log, until the one that says it is ready.
   const deadline = Date.now() + timeoutMs;
-  let last = started;
-  while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 5000));
-    last = await kimodoWorkerHealth(10000);
-    if (last.ok && last.body?.ok) return last;
+  let readyTimer;
+  const ready = await Promise.race([
+    new Promise((resolve) => {
+      const lines = readline.createInterface({ input: proc.stdout });
+      const sink = openSync(path.join(args.stateRoot, "logs", "worker.log"), "a");
+      lines.on("line", (line) => {
+        try {
+          const event = JSON.parse(line);
+          if (event?.event === "kimodo-worker-ready" && Number.isInteger(event.port)) return resolve(event);
+        } catch {
+          // not JSON: an ordinary log line
+        }
+        writeSync(sink, `${line}\n`);
+      });
+      lines.on("close", () => closeSync(sink));
+    }),
+    exited.then((reason) => ({ failed: reason })),
+    new Promise((resolve) => { readyTimer = setTimeout(() => resolve({ failed: "the worker was not ready in time" }), timeoutMs); }),
+  ]);
+  clearTimeout(readyTimer);
+  if (ready.failed) await fail(ready.failed);
+  worker.port = ready.port;
+
+  for (;;) {
+    try {
+      const health = await fetch(`http://127.0.0.1:${worker.port}/health`, { signal: AbortSignal.timeout(10000) });
+      const body = await health.json();
+      if (health.ok && body?.ok) {
+        worker.servedModels = [body.model, body.displayModel].filter(Boolean);
+        worker.state = "ready";
+        return;
+      }
+    } catch {
+      // not answering yet
+    }
+    if (worker.proc !== proc) throw new Error(worker.lastError || "the worker exited");
+    if (Date.now() > deadline) await fail("the worker did not become healthy in time");
+    await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  return {
-    ok: false,
-    stdout: last.stdout || "",
-    stderr: last.stderr || "",
-    error: `Kimodo worker did not become healthy within ${timeoutMs}ms.`,
-    body: last.body || null,
-  };
+}
+
+async function ensureWorker({ model = null, timeoutMs = 1000 * 60 * 8 } = {}) {
+  if (starting) await starting;
+  if (worker.state === "ready" && model && !worker.servedModels.includes(model)) await stopWorker();
+  if (worker.state === "ready") return;
+  if (!starting) starting = startWorker(model, timeoutMs).finally(() => { starting = null; });
+  await starting;
 }
 
 async function readRequestBody(request) {
@@ -503,11 +463,15 @@ async function readRequestBody(request) {
 }
 
 async function generateMotion(request, response) {
+  if (workerUnconfigured()) {
+    json(response, 503, { ok: false, code: "worker-unconfigured" });
+    return;
+  }
   let body;
   try {
     body = await readRequestBody(request);
-  } catch (error) {
-    json(response, 400, { ok: false, error: `Invalid JSON: ${error.message}` });
+  } catch {
+    json(response, 400, { ok: false, error: "Invalid JSON." });
     return;
   }
 
@@ -560,7 +524,7 @@ async function generateMotion(request, response) {
     if (typeof body.constraints === "string") return body.constraints;
     if (body.constraints_path) return body.constraints_path;
     if (body.constraintsPath) return body.constraintsPath;
-    if (body.constraints !== undefined) return `/outputs/${jobId}/constraints.json`;
+    if (body.constraints !== undefined) return path.join(artifactDir, "constraints.json");
     return undefined;
   })();
   if (body.constraints !== undefined && typeof body.constraints !== "string") {
@@ -588,12 +552,13 @@ async function generateMotion(request, response) {
     inputFolder: firstDefined(body.inputFolder, body.input_folder),
   };
   await writeFile(path.join(artifactDir, "meta.json"), JSON.stringify(meta, null, 2));
-  const worker = await ensureKimodoWorker({
-    timeoutMs: Number(firstDefined(body.workerTimeoutMs, body.worker_timeout_ms, 1000 * 60 * 8)),
-    model: body.model || null,
-  });
-  let result = worker;
-  if (worker.ok) {
+
+  let result;
+  try {
+    await ensureWorker({
+      timeoutMs: Number(firstDefined(body.workerTimeoutMs, body.worker_timeout_ms, 1000 * 60 * 8)),
+      model: body.model || null,
+    });
     const workerRequest = {
       model: body.model,
       prompt: prompt || undefined,
@@ -613,20 +578,19 @@ async function generateMotion(request, response) {
       bvhStandardTpose: boolValue(firstDefined(body.bvhStandardTpose, body.bvh_standard_tpose)),
       noPostprocess: boolValue(firstDefined(body.noPostprocess, body.no_postprocess)),
       saveExampleDir: boolValue(firstDefined(body.saveExampleDir, body.save_example_dir)),
-      output: `/outputs/${jobId}/motion`,
+      output: path.join(artifactDir, "motion"),
     };
     await writeFile(path.join(artifactDir, "request.json"), JSON.stringify(workerRequest, null, 2));
-    const curlCommand = [
-      `curl -sS --max-time ${Math.ceil(Number(body.timeoutMs || 1000 * 60 * 30) / 1000)}`,
-      "-H 'content-type: application/json'",
-      `--data-binary @${shQuote(`/mnt/e/Projects/Vili/.vili/artifacts/${jobId}/request.json`)}`,
-      shQuote(`${kimodoWorkerUrl}/generate`),
-    ].join(" ");
-    result = await wslJson([
-      "set -e",
-      curlCommand,
-    ].join("; "), { timeout: Number(body.timeoutMs || 1000 * 60 * 30) });
-    if (result.body?.ok === false) result = { ...result, ok: false };
+    const answer = await fetch(`http://127.0.0.1:${worker.port}/generate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(workerRequest),
+      signal: AbortSignal.timeout(Number(body.timeoutMs || 1000 * 60 * 30)),
+    });
+    const workerBody = await answer.json();
+    result = { ok: answer.ok && workerBody?.ok !== false, error: answer.ok ? null : `the worker answered ${answer.status}`, body: workerBody };
+  } catch (error) {
+    result = { ok: false, error: `the worker request failed (${error?.name || "Error"})`, body: null };
   }
 
   const job = {
@@ -641,54 +605,21 @@ async function generateMotion(request, response) {
     seed,
     artifactDir,
     ok: result.ok,
-    stdout: result.stdout,
-    stderr: result.stderr,
     error: result.error,
     worker: result.body,
   };
-  await writeFile(path.join(args.stateRoot, "jobs", `${jobId}.json`), JSON.stringify(job, null, 2)).catch(async () => {
-    await mkdir(path.join(args.stateRoot, "jobs"), { recursive: true });
-    await writeFile(path.join(args.stateRoot, "jobs", `${jobId}.json`), JSON.stringify(job, null, 2));
-  });
+  await writeFile(path.join(args.stateRoot, "jobs", `${jobId}.json`), JSON.stringify(job, null, 2));
   json(response, result.ok ? 200 : 502, job);
 }
 
 async function handleRequest(request, response) {
   const url = new URL(request.url, `http://${request.headers.host || `${args.host}:${args.port}`}`);
-  if (request.method === "OPTIONS") {
-    response.writeHead(204, {
-      "access-control-allow-origin": "*",
-      "access-control-allow-methods": "GET,POST,OPTIONS",
-      "access-control-allow-headers": "content-type",
-    });
-    response.end();
-    return;
-  }
+  if (request.method === "POST" && refuseCrossSite(request, response)) return;
 
   if (url.pathname === "/" || url.pathname === "/health") {
-    await refreshBackendStatus({ includeKimodoHelp: false });
     json(response, 200, { ok: true, service: "vili", providerId, state: operatorState() });
-  } else if (url.pathname === "/provider-advertisement") {
-    json(response, 200, providerAdvertisement());
   } else if (url.pathname === "/operator-state") {
     json(response, 200, operatorState());
-  } else if (url.pathname === "/eve/operator") {
-    json(response, 200, eveSurface());
-  } else if (url.pathname === "/eve/deck/providers") {
-    json(response, 200, {
-      providers: [{
-        id: providerId,
-        title: "Vili Animation",
-        description: "Persona animation and Kimodo motion generation daemon.",
-        endpoint: `${ravenDeckUrl}/${providerId}`,
-      }],
-    });
-  } else if (url.pathname === "/smoke") {
-    const result = await refreshBackendStatus({ includeKimodoHelp: true });
-    const worker = await ensureKimodoWorker();
-    await refreshBackendStatus({ includeKimodoHelp: false });
-    const ok = result.backendStatus.kimodoHelp === "ok" && worker.ok && worker.body?.ok;
-    json(response, ok ? 200 : 502, { ok, ...result, worker: worker.body || worker });
   } else if (url.pathname === "/motion/generate" && request.method === "POST") {
     await generateMotion(request, response);
   } else {
@@ -704,11 +635,6 @@ async function healthCheck() {
   if (!body.ok) throw new Error("health returned ok=false");
 }
 
-if (args.printProviderAdvertisement) {
-  console.log(JSON.stringify(providerAdvertisement(), null, 2));
-  process.exit(0);
-}
-
 if (args.health) {
   healthCheck().then(() => process.exit(0), (error) => {
     console.error(error.message);
@@ -720,32 +646,26 @@ if (args.health) {
 
   const server = http.createServer((request, response) => {
     handleRequest(request, response).catch((error) => {
-      json(response, 500, { ok: false, error: error.message, stack: process.env.NODE_ENV === "development" ? error.stack : undefined });
+      // The error's message can carry the request; name only its class.
+      console.error(`request failed: ${error?.name || "Error"}`);
+      if (!response.headersSent) json(response, 500, { ok: false, code: "internal" });
+      else response.end();
     });
   });
 
-  const wss = new WebSocketServer({ noServer: true });
-  wss.on("connection", (socket) => {
-    const sendSurface = () => {
-      if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(eveSurface()));
-    };
-    sendSurface();
-    const timer = setInterval(sendSurface, 5000);
-    socket.on("close", () => clearInterval(timer));
-  });
-
-  server.on("upgrade", (request, socket, head) => {
-    const url = new URL(request.url, `http://${request.headers.host || `${args.host}:${args.port}`}`);
-    if (url.pathname === `/eve/deck/${providerId}` || url.pathname === "/eve/deck") {
-      wss.handleUpgrade(request, socket, head, (ws) => wss.emit("connection", ws, request));
-    } else {
-      socket.destroy();
-    }
-  });
-
   server.listen(args.port, args.host, () => {
-    console.log(`Vili listening on http://${args.host}:${args.port}`);
+    reclaimStrayWorker(); // synchronous: no request is served before a predecessor's worker is gone
+    console.log(`Vili listening on http://${args.host}:${server.address().port}`);
   });
 
-  setInterval(() => persistSurfaces().catch((error) => console.error(error)), 5000);
+  const surfaceTimer = setInterval(() => persistSurfaces().catch((error) => console.error(`persist failed: ${error?.name || "Error"}`)), 5000);
+
+  const shutdown = async () => {
+    clearInterval(surfaceTimer);
+    await stopWorker();
+    server.close();
+    process.exit(0);
+  };
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
 }

@@ -9,9 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
 from types import SimpleNamespace
 
-import peft
 import torch
-import transformers
 from huggingface_hub.constants import HF_HOME
 
 from kimodo import DEFAULT_MODEL, load_model
@@ -34,32 +32,25 @@ import text_encoding
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Resident Vili worker for Kimodo motion generation")
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8825)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     return parser.parse_args()
 
 
 args = parse_args()
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
+device = "cpu"
+threads = text_encoding.apply_thread_cap(os.environ)
+torch.set_num_interop_threads(1)
 started_at = time.time()
 model_load_started_at = time.time()
 preset = TEXT_ENCODER_PRESETS["llm2vec"]["kwargs"]
 kimodo_commit = os.environ["VILI_KIMODO_COMMIT"]
-kimodo_image = os.environ["VILI_KIMODO_IMAGE"]
-encoder_identity = text_encoding.encoder_identity(
-    revisions={
-        repo: text_encoding.read_snapshot_revision(HF_HOME, repo)
-        for repo in (preset["base_model_name_or_path"], preset["peft_model_name_or_path"], text_encoding.LLAMA_BASE)
-    },
-    dtype=preset["dtype"],
-    transformers_version=transformers.__version__,
-    peft_version=peft.__version__,
-    kimodo_commit=kimodo_commit,
-)
+python_env = os.environ["VILI_PYTHON_ENV"]
+encoder_identity = text_encoding.live_identity(HF_HOME, preset, kimodo_commit)
 # The 8B encoder never lives here: misses go to a one-shot child (kimodo-text-encode.py), hits come from the store.
 text_encoder = text_encoding.CachedTextEncoder(
-    text_encoding.open_store(os.path.join(os.environ.get("VILI_EMBEDDINGS_DIR", "/vili-embeddings"), "text-embeddings.cc")),
+    text_encoding.open_store(os.path.join(os.environ["VILI_EMBEDDINGS_DIR"], "text-embeddings.cc")),
     encoder_identity,
     text_encoding.encode_misses_in_child,
     device=device,
@@ -72,7 +63,7 @@ model, resolved_model = load_model(
     text_encoder=text_encoder,
 )
 model_revision = text_encoding.read_snapshot_revision(HF_HOME, MODEL_NAMES[resolved_model])
-worker_identity = {"kimodoCommit": kimodo_commit, "imageId": kimodo_image, "modelRevision": model_revision}
+worker_identity = {"kimodoCommit": kimodo_commit, "pythonEnv": python_env, "modelRevision": model_revision, "threads": threads}
 model_load_seconds = time.time() - model_load_started_at
 model_info = get_model_info(resolved_model)
 display_model = model_info.display_name if model_info else resolved_model
@@ -272,10 +263,12 @@ def generate(payload):
 
     requested_model = payload.get("model")
     if requested_model and requested_model != resolved_model and requested_model != display_model:
-        raise ValueError(f"Worker model is {resolved_model}; request asked for {requested_model}.")
+        raise ValueError("The request names a model this worker does not serve.")
 
     meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
-    output_base = str(payload.get("output") or "/outputs/motion")
+    if not payload.get("output"):
+        raise ValueError("The request carries no output path.")
+    output_base = str(payload["output"])
     diffusion_steps = max(1, int(payload.get("diffusionSteps") or payload.get("diffusion_steps") or meta.get("diffusion_steps") or 20))
     num_samples = max(1, int(payload.get("numSamples") or payload.get("num_samples") or meta.get("num_samples") or 1))
     num_transition_frames = int(payload.get("numTransitionFrames") or payload.get("num_transition_frames") or 5)
@@ -394,22 +387,24 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
             write_json(self, 200, generate(payload))
         except Exception as error:
-            write_json(self, 500, {
-                "ok": False,
-                "error": str(error),
-                "traceback": traceback.format_exc(),
-            })
+            # An error names its class and where it was raised, never a message: messages can carry the request.
+            frame = traceback.extract_tb(error.__traceback__)[-1]
+            where = f"{os.path.basename(frame.filename)}:{frame.lineno}"
+            print(f"generate failed: {type(error).__name__} at {where}", flush=True)
+            write_json(self, 500, {"ok": False, "error": f"{type(error).__name__} at {where}"})
 
     def log_message(self, fmt, *values):
         print(f"{self.address_string()} - {fmt % values}", flush=True)
 
 
+server = ThreadingHTTPServer((args.host, args.port), Handler)
 print(json.dumps({
     "event": "kimodo-worker-ready",
     "device": device,
     "model": resolved_model,
     "displayModel": display_model,
     "modelLoadSeconds": model_load_seconds,
-    "port": args.port,
+    "port": server.server_address[1],
+    "threads": threads,
 }), flush=True)
-ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
+server.serve_forever()

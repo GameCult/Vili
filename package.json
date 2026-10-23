@@ -7,11 +7,9 @@
   "scripts": {
     "start": "node scripts/vili-daemon.mjs",
     "health": "node scripts/vili-daemon.mjs --health",
-    "smoke": "node scripts/smoke-vili.mjs",
-    "provider": "node scripts/vili-daemon.mjs --print-provider-advertisement"
+    "test": "node --test --test-timeout=60000 scripts/test-vili-daemon.mjs"
   },
   "dependencies": {
-    "cultcache-ts": "file:../CultLib/packages/cultcache-ts",
-    "ws": "^8.18.0"
+    "cultcache-ts": "file:vendor/CultLib/packages/cultcache-ts"
   }
 }
