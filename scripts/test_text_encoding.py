@@ -5,7 +5,9 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -51,10 +53,13 @@ class Identity(unittest.TestCase):
         self.assertEqual(len(key), 64)
         int(key, 16)
         self.assertNotEqual(key, te.embedding_key("id", "text b"))
+        self.assertNotEqual(te.embedding_key("id", "a" * 300 + "x"), te.embedding_key("id", "a" * 300 + "y"))
 
-    def test_chat_header_is_the_llama3_user_turn(self):
-        self.assertEqual(te.chat_header("  hello  "), "<|start_header_id|>user<|end_header_id|>" + chr(10) * 2 + "hello<|eot_id|>")
-        form = hashlib.sha256(("<|start_header_id|>user<|end_header_id|>" + chr(10) * 2 + "|<|eot_id|>").encode("utf-8")).hexdigest()
+    def test_chat_header_is_the_llama3_user_turn_pooled_after_the_separator(self):
+        header = "<|start_header_id|>user<|end_header_id|>" + chr(10) * 2
+        self.assertEqual(te.chat_header("hello  "), header + "!@#$%^&*()hello<|eot_id|>")
+        self.assertEqual(te.chat_header("  hello"), header + "!@#$%^&*()  hello<|eot_id|>")
+        form = hashlib.sha256(("|".join((header, "!@#$%^&*()", "<|eot_id|>"))).encode("utf-8")).hexdigest()
         self.assertEqual(te.PROMPT_FORM, "llama3-chat-header:" + form)
 
     def test_every_identity_field_changes_the_key(self):
@@ -76,11 +81,12 @@ class Identity(unittest.TestCase):
 
             for repo in repos:
                 write_revision(repo, revision[repo])
-            real_child = te.CHILD_PATH
+            real_child, real_versions = te.CHILD_PATH, te.installed_versions
             te.CHILD_PATH = loader
             try:
                 def identity(preset=preset, commit="6bb5848", versions=versions):
-                    return te.live_identity(home, preset, commit, versions)
+                    te.installed_versions = lambda: versions
+                    return te.live_identity(home, preset, commit)
 
                 base = identity()
                 self.assertGreater(base.index("assembly="), 200)
@@ -98,12 +104,12 @@ class Identity(unittest.TestCase):
                 loader.write_bytes(b"one")
                 self.assertEqual(identity(), base)
             finally:
-                te.CHILD_PATH = real_child
-            self.assertEqual(len(changed), 9)
+                te.CHILD_PATH, te.installed_versions = real_child, real_versions
+            self.assertEqual(len(changed), 10)
             for field, other in changed.items():
                 self.assertNotEqual(te.embedding_key(base, "x"), te.embedding_key(other, "x"), field)
-            for field in ("assembly", "prompt", "device"):
-                self.assertIn(f"{field}=", base)
+            for part in (f"assembly={te.ASSEMBLY}", f"prompt={te.PROMPT_FORM}", "device=cpu", "dtype=bfloat16", "torch=2.5.1+cpu"):
+                self.assertIn(part, base)
 
     def test_assembly_prompt_and_device_change_the_key(self):
         fields = dict(
@@ -112,23 +118,15 @@ class Identity(unittest.TestCase):
             kimodo_commit="6bb5848", loader_sha256="a" * 64,
         )
         key = te.embedding_key(te.encoder_identity(**fields), "x")
-        for name, other in (("assembly", "llm2vec-A"), ("prompt_form", "none"), ("device", "cuda")):
+        for name, other in (("assembly", "llm2vec-A"), ("prompt_form", "none"), ("device", "other-device")):
             self.assertNotEqual(key, te.embedding_key(te.encoder_identity(**{**fields, name: other}), "x"), name)
 
-    def test_installed_versions_are_the_libraries_in_use(self):
-        import accelerate
-        import peft
-        import transformers
-        self.assertEqual(te.installed_versions(), {
-            "torch": te.torch.__version__, "transformers": transformers.__version__, "peft": peft.__version__, "accelerate": accelerate.__version__,
-        })
-
-    def test_snapshot_revision_is_read_from_the_mounted_cache(self):
-        with tempfile.TemporaryDirectory() as home:
-            refs = Path(home) / "hub" / "models--org--name" / "refs"
-            refs.mkdir(parents=True)
-            (refs / "main").write_text("deadbeef\n")
-            self.assertEqual(te.read_snapshot_revision(Path(home), "org/name"), "deadbeef")
+    def test_installed_versions_are_read_from_the_libraries_in_use(self):
+        fakes = {name: types.SimpleNamespace(__version__=f"{name}-v") for name in ("transformers", "peft", "accelerate")}
+        with mock.patch.dict(sys.modules, fakes), mock.patch.object(te.torch, "__version__", "torch-v"):
+            self.assertEqual(te.installed_versions(), {
+                "torch": "torch-v", "transformers": "transformers-v", "peft": "peft-v", "accelerate": "accelerate-v",
+            })
 
 
 class SnapshotPath(unittest.TestCase):
@@ -278,7 +276,7 @@ import sys, numpy as np
 from kimodo.model.load_model import TEXT_ENCODER_PRESETS
 from kimodo.model.llm2vec.llm2vec_wrapper import LLM2VecEncoder
 kwargs = TEXT_ENCODER_PRESETS["llm2vec"]["kwargs"]
-encoder = LLM2VecEncoder(**kwargs, device="cpu")
+encoder = LLM2VecEncoder(**{**kwargs, "device": "cpu"})
 vector, _ = encoder(sys.argv[2])
 np.save(sys.argv[1], vector.float().numpy().reshape(-1))
 """
@@ -296,7 +294,7 @@ class ReferenceVector(unittest.TestCase):
             subprocess.run([sys.executable, "-c", REFERENCE_CODE, str(reference), ROCK], env=env, check=True)
             os.environ.update(env)
             ours = np.frombuffer(te.run_child([ROCK], Path(directory) / "answer.mp")["vectors"][0], dtype=np.float32)
-        expected = np.load(reference)
+            expected = np.load(reference)
         cosine = float(ours @ expected / (np.linalg.norm(ours) * np.linalg.norm(expected)))
         print("cosine to Kimodo from repo ids:", cosine)
         self.assertGreaterEqual(cosine, 0.9999)

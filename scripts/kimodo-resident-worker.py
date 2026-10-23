@@ -47,9 +47,7 @@ model_load_started_at = time.time()
 preset = TEXT_ENCODER_PRESETS["llm2vec"]["kwargs"]
 kimodo_commit = os.environ["VILI_KIMODO_COMMIT"]
 python_env = os.environ["VILI_PYTHON_ENV"]
-encoder_identity = text_encoding.live_identity(
-    HF_HOME, preset, kimodo_commit, text_encoding.installed_versions(),
-)
+encoder_identity = text_encoding.live_identity(HF_HOME, preset, kimodo_commit)
 # The 8B encoder never lives here: misses go to a one-shot child (kimodo-text-encode.py), hits come from the store.
 text_encoder = text_encoding.CachedTextEncoder(
     text_encoding.open_store(os.path.join(os.environ["VILI_EMBEDDINGS_DIR"], "text-embeddings.cc")),

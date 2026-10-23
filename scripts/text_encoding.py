@@ -28,10 +28,13 @@ CHILD_PATH = Path(__file__).with_name("kimodo-text-encode.py")
 LLAMA_BASE = "meta-llama/Meta-Llama-3-8B-Instruct"  # the base model both LLM2Vec adapters are applied to
 ASSEMBLY = "llm2vec-mntp-merged-then-supervised"
 # Llama-3 Instruct's chat header, applied by Vili's own code (motion-pipeline:ruling:encoder-chat-header-on): the
-# text goes in as a user turn, as LLM2Vec does for this model when it is loaded from the repo id.
+# text goes in as a user turn, as LLM2Vec does for this model when it is loaded from the repo id. The separator is
+# LLM2Vec's instruction/query marker: the model attends over the whole turn, and pooling covers what follows the
+# marker (the text and the end-of-turn token), not the header, exactly as Kimodo's encoder pools.
 CHAT_HEADER_PREFIX = "<|start_header_id|>user<|end_header_id|>\n\n"
 CHAT_HEADER_SUFFIX = "<|eot_id|>"
-PROMPT_FORM = "llama3-chat-header:" + hashlib.sha256((CHAT_HEADER_PREFIX + "|" + CHAT_HEADER_SUFFIX).encode("utf-8")).hexdigest()
+QUERY_SEPARATOR = "!@#$%^&*()"
+PROMPT_FORM = "llama3-chat-header:" + hashlib.sha256("|".join((CHAT_HEADER_PREFIX, QUERY_SEPARATOR, CHAT_HEADER_SUFFIX)).encode("utf-8")).hexdigest()
 MAX_THREADS = 16
 
 
@@ -61,8 +64,8 @@ def snapshot_path(hf_home: Path, repo_id: str) -> Path:
 
 
 def chat_header(text: str) -> str:
-    """The text as the encoder reads it: a user turn in Llama-3 Instruct's chat format."""
-    return CHAT_HEADER_PREFIX + text.strip() + CHAT_HEADER_SUFFIX
+    """The text as the encoder reads it: a user turn in Llama-3 Instruct's chat format, pooled after the separator."""
+    return CHAT_HEADER_PREFIX + (QUERY_SEPARATOR + text).strip() + CHAT_HEADER_SUFFIX
 
 
 def encoder_identity(*, assembly: str, prompt_form: str, device: str, revisions: dict, dtype: str, torch_version: str,
@@ -87,9 +90,10 @@ def installed_versions() -> dict:
     return {"torch": torch.__version__, "transformers": transformers.__version__, "peft": peft.__version__, "accelerate": accelerate.__version__}
 
 
-def live_identity(hf_home, preset: dict, kimodo_commit: str, versions: dict) -> str:
+def live_identity(hf_home, preset: dict, kimodo_commit: str) -> str:
     """The identity the worker keys vectors under: the three snapshot revisions the mounted cache names, the preset's
     dtype, the library versions, the Kimodo commit and the sha256 of the encoder child's own bytes."""
+    versions = installed_versions()
     repos = (preset["base_model_name_or_path"], preset["peft_model_name_or_path"], LLAMA_BASE)
     return encoder_identity(
         assembly=ASSEMBLY, prompt_form=PROMPT_FORM, device="cpu",
