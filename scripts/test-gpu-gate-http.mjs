@@ -129,16 +129,21 @@ test("http: an allowed request reaches the slot and the VRAM read", async () => 
 
 test("http: the switch is the household's", async () => {
   const stateRoot = await mkdtemp(path.join(os.tmpdir(), "vili-gate-lan-"));
-  const d = await bootDaemon(stateRoot, { host: "0.0.0.0" });
+  const addresses = Object.values(os.networkInterfaces()).flat().filter((i) => i.family === "IPv4" && !i.internal).map((i) => i.address);
+  const lan = addresses[0];
+  assert.ok(lan, "the host has a non-loopback IPv4 address");
+  const d = await bootDaemon(stateRoot, { host: `127.0.0.1,${lan}` });
   try {
-    const lan = Object.values(os.networkInterfaces()).flat().find((i) => i.family === "IPv4" && !i.internal)?.address;
-    assert.ok(lan, "the host has a non-loopback IPv4 address");
     const before = await readPermission(d);
     const refused = await setPermission(d, { allowed: true }, lan);
     assert.equal(refused.status, 403);
     assert.deepEqual(await refused.json(), { ok: false, code: "household-only" });
     assert.deepEqual(await readPermission(d), before, "GET still reads the previous value");
     assert.equal((await setPermission(d, { allowed: true })).status, 200, "loopback still sets it");
+    const other = addresses.find((address) => address !== lan);
+    if (other) {
+      await assert.rejects(fetch(url(d, "/gpu-permission", other)), "an address --host does not name is not served");
+    }
   } finally {
     await d.stop();
     await rm(stateRoot, { recursive: true, force: true });
@@ -200,6 +205,8 @@ class Stub {
     string dir = Environment.GetEnvironmentVariable("VILI_STUB_DIR");
     if (exe == "nvidia-smi") { Console.WriteLine("20000"); return 0; }
     string script = args.Length > 0 ? args[args.Length - 1] : "";
+    if (script.Contains("docker run")) File.AppendAllText(Path.Combine(dir, "dockerrun"), "x");
+    if (script.Contains("service docker start")) File.AppendAllText(Path.Combine(dir, "dockerstart"), "x");
     if (script.Contains("/health")) { Console.WriteLine("{\\"ok\\":true,\\"model\\":\\"stub\\"}"); return 0; }
     if (script.Contains("/generate")) {
       File.AppendAllText(Path.Combine(dir, "started"), "x");
@@ -298,3 +305,72 @@ test("http: a malformed override refuses to start and names the variable, not it
     await rm(stateRoot, { recursive: true, force: true });
   }
 });
+
+test("http: the daemon refuses to listen on a wildcard address", async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), "vili-gate-wild-"));
+  try {
+    for (const host of ["0.0.0.0", "127.0.0.1,0.0.0.0", "::"]) {
+      const run = spawnSync(process.execPath, [daemonPath, "--host", host, "--port", String(nextPort++), "--state-root", stateRoot], {
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 20000,
+      });
+      assert.equal(run.status, 2, `--host ${host} exits 2`);
+      assert.equal(`${run.stdout}${run.stderr}`.includes("Vili listening"), false);
+    }
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("http: no response grants a web page access", async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), "vili-gate-cors-"));
+  const d = await bootDaemon(stateRoot);
+  try {
+    const hostile = { origin: "http://evil.example-origin" };
+    const responses = [
+      await fetch(url(d, "/gpu-permission"), { headers: hostile }),
+      await fetch(url(d, "/operator-state"), { headers: hostile }),
+      await fetch(url(d, "/nowhere"), { headers: hostile }),
+      await fetch(url(d, "/gpu-permission"), { method: "POST", headers: { ...hostile, "content-type": "application/json" }, body: "{}" }),
+    ];
+    assert.deepEqual(responses.map((r) => r.status), [200, 200, 404, 403]);
+    for (const response of responses) {
+      const cors = [...response.headers.keys()].filter((name) => name.startsWith("access-control-"));
+      assert.deepEqual(cors, [], "no access-control header on any response");
+    }
+  } finally {
+    await d.stop();
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("http: with the permission off nothing a web page or a LAN caller sends reaches the GPU", async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), "vili-gate-off-"));
+  const stubDir = await mkdtemp(path.join(os.tmpdir(), "vili-gate-stub-"));
+  const d = await stubbedDaemon(stubDir, stateRoot);
+  const page = { origin: "http://evil.example-origin", "sec-fetch-site": "cross-site", "sec-fetch-mode": "no-cors", "sec-fetch-dest": "image" };
+  try {
+    const before = await readPermission(d);
+    assert.equal(before.allowed, false);
+    for (const route of ["/smoke", "/health", "/", "/operator-state", "/eve/operator", "/provider-advertisement", "/eve/deck/providers", "/gpu-permission"]) {
+      const response = await fetch(url(d, route), { headers: page });
+      assert.equal(response.status, route === "/smoke" ? 404 : 200, `GET ${route}`);
+    }
+    const refused = await generate(d, { prompt: "a person waves hello, never seen before" });
+    assert.equal(refused.status, 503);
+    assert.equal((await refused.json()).source, "household");
+    assert.equal((await setPermission(d, { allowed: true }, "127.0.0.1")).status, 200);
+    assert.equal((await setPermission(d, { allowed: false }, "127.0.0.1")).status, 200);
+    assert.deepEqual((await readPermission(d)).allowed, false);
+    assert.equal(existsSync(path.join(stubDir, "dockerrun")), false, "nothing ran docker run (the worker or any GPU container)");
+    assert.equal(existsSync(path.join(stubDir, "dockerstart")), false, "no GET started Docker");
+    assert.equal(existsSync(path.join(stubDir, "started")), false, "nothing reached the worker");
+    assert.deepEqual(await readdir(path.join(stateRoot, "jobs")), [], "no job file");
+  } finally {
+    await d.stop();
+    await rm(stateRoot, { recursive: true, force: true });
+    await rm(stubDir, { recursive: true, force: true });
+  }
+});
+

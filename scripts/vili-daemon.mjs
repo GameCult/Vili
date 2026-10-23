@@ -131,6 +131,8 @@ const viliDocumentRegistry = defineDocumentRegistry(
 
 function parseArgs(argv) {
   const args = {
+    // Comma-separated addresses to listen on, one server each. Never 0.0.0.0: the daemon answers
+    // this machine and the WireGuard address, not whatever network the machine joins next.
     host: process.env.VILI_DAEMON_HOST || "127.0.0.1",
     port: Number(process.env.VILI_DAEMON_PORT || 8824),
     stateRoot: process.env.VILI_STATE_ROOT || path.join(projectRoot, ".vili"),
@@ -150,6 +152,7 @@ function parseArgs(argv) {
 }
 
 const args = parseArgs(process.argv.slice(2));
+const hosts = args.host.split(",").map((host) => host.trim()).filter(Boolean);
 const startedAt = new Date().toISOString();
 const gpuOptions = gpuTenancyOptionsFromEnv(process.env);
 // The daemon's one cache and store instance: every write to vili.service.cc goes through one queue.
@@ -174,7 +177,6 @@ let backendStatus = {
   dockerImage: "unknown",
   nvidiaRuntime: "unknown",
   huggingFaceToken: "unknown",
-  kimodoHelp: "unknown",
   kimodoWorker: "unknown",
   kimodoWorkerDetail: null,
   lastError: null,
@@ -238,7 +240,6 @@ function json(response, statusCode, body, headers = {}) {
     ...headers,
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
-    "access-control-allow-origin": "*",
   });
   response.end(payload);
 }
@@ -247,7 +248,6 @@ function text(response, statusCode, body) {
   response.writeHead(statusCode, {
     "content-type": "text/plain; charset=utf-8",
     "cache-control": "no-store",
-    "access-control-allow-origin": "*",
   });
   response.end(body);
 }
@@ -266,7 +266,6 @@ function providerAdvertisement() {
     endpoints: {
       http: ravenBaseUrl,
       health: `${ravenBaseUrl}/health`,
-      smoke: `${ravenBaseUrl}/smoke`,
       providerAdvertisement: `${ravenBaseUrl}/provider-advertisement`,
       operatorState: `${ravenBaseUrl}/operator-state`,
       operatorSurface: `${ravenBaseUrl}/eve/operator`,
@@ -314,7 +313,6 @@ function operatorState() {
       operatorState: "/operator-state",
       operatorSurface: "/eve/operator",
       deckProviders: "/eve/deck/providers",
-      smoke: "/smoke",
       generate: "/motion/generate",
       gpuPermission: "/gpu-permission",
     },
@@ -344,11 +342,6 @@ function commandBoundary() {
         method: "POST",
         path: "/gpu-permission",
         owns: ["the household GPU permission for this host, from loopback only"],
-      },
-      smoke: {
-        method: "GET",
-        path: "/smoke",
-        owns: ["backend readiness proof", "resident worker warmup"],
       },
       liveness: {
         method: "GET",
@@ -400,10 +393,8 @@ function eveSurface() {
           { type: "stat", label: "Verse", value: "raven.local" },
           { type: "stat", label: "Docker image", value: state.backend.dockerImage },
           { type: "stat", label: "NVIDIA runtime", value: state.backend.nvidiaRuntime },
-          { type: "stat", label: "Kimodo", value: state.backend.kimodoHelp },
           { type: "stat", label: "Kimodo worker", value: state.backend.kimodoWorker },
           { type: "stat", label: "HF token", value: state.backend.huggingFaceToken },
-          { type: "command", label: "Smoke", method: "GET", href: `${ravenBaseUrl}/smoke` },
           { type: "command", label: "Generate motion", method: "POST", href: `${ravenBaseUrl}/motion/generate` },
         ],
       },
@@ -431,48 +422,24 @@ async function persistCultCacheSurfaces() {
   await viliCache.put(transportProfileDefinition, "vili", transportProfile());
 }
 
-async function refreshBackendStatus({ includeKimodoHelp = false } = {}) {
-  const docker = await wsl([
-    "set -e",
-    "service docker start >/dev/null 2>&1 || true",
-    "docker images gamecult/kimodo:latest --format '{{.Repository}}:{{.Tag}}' | head -n 1",
-  ].join("; "), { timeout: 20000 });
-
-  let nvidia = await wsl([
-    "set -e",
-    "service docker start >/dev/null 2>&1 || true",
-    "docker info --format '{{json .Runtimes}}' | grep -q nvidia && echo configured || echo missing",
-  ].join("; "), { timeout: 20000 });
-
+// A read: it only asks. Starting docker and the worker belongs to a job that holds the GPU slot.
+async function refreshBackendStatus() {
+  const docker = await wsl("docker images gamecult/kimodo:latest --format '{{.Repository}}:{{.Tag}}' | head -n 1", { timeout: 20000 });
+  const nvidia = await wsl("docker info --format '{{json .Runtimes}}' | grep -q nvidia && echo configured || echo missing", { timeout: 20000 });
   const token = await wsl("test -f /root/.cache/huggingface/token && echo present || echo missing", { timeout: 10000 });
   const worker = await kimodoWorkerHealth(20000);
-  let help = { ok: true, stdout: backendStatus.kimodoHelp === "ok" ? "ok" : "not checked", stderr: "" };
-  if (includeKimodoHelp) {
-    nvidia = await wsl([
-      "set -e",
-      "service docker start >/dev/null 2>&1 || true",
-      "docker run --rm --runtime=nvidia --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1",
-    ].join("; "), { timeout: 45000 });
-    help = await wsl([
-      "set -e",
-      "service docker start >/dev/null 2>&1 || true",
-      dockerHuggingFaceEnv,
-      `docker run --rm --runtime=nvidia --gpus all ${dockerHuggingFaceArgs} gamecult/kimodo:latest kimodo_gen --help | sed -n '1,6p'`,
-    ].join("; "), { timeout: 60000 });
-  }
 
   backendStatus = {
     checkedAt: new Date().toISOString(),
     dockerImage: docker.ok && docker.stdout ? docker.stdout : "missing",
     nvidiaRuntime: nvidia.ok && nvidia.stdout ? nvidia.stdout : "unavailable",
     huggingFaceToken: token.ok ? token.stdout : "unknown",
-    kimodoHelp: includeKimodoHelp ? (help.ok ? "ok" : "failed") : backendStatus.kimodoHelp,
     kimodoWorker: worker.ok && worker.body?.ok ? "resident" : "not running",
     kimodoWorkerDetail: worker.body || null,
-    lastError: [docker, nvidia, token, help].find((result) => !result.ok)?.stderr || null,
+    lastError: [docker, nvidia, token].find((result) => !result.ok)?.stderr || null,
   };
   await persistSurfaces();
-  return { docker, nvidia, token, help, backendStatus };
+  return backendStatus;
 }
 
 async function kimodoWorkerHealth(timeout = 10000) {
@@ -742,9 +709,9 @@ async function runMotionJob(body, prompt, response) {
 }
 
 async function handleRequest(request, response) {
-  const url = new URL(request.url, `http://${request.headers.host || `${args.host}:${args.port}`}`);
+  const url = new URL(request.url, `http://${request.headers.host || `${hosts[0]}:${args.port}`}`);
   if (url.pathname === "/" || url.pathname === "/health") {
-    await refreshBackendStatus({ includeKimodoHelp: false });
+    await refreshBackendStatus();
     json(response, 200, { ok: true, service: "vili", providerId, state: operatorState() });
   } else if (url.pathname === "/provider-advertisement") {
     json(response, 200, providerAdvertisement());
@@ -761,12 +728,6 @@ async function handleRequest(request, response) {
         endpoint: `${ravenDeckUrl}/${providerId}`,
       }],
     });
-  } else if (url.pathname === "/smoke") {
-    const result = await refreshBackendStatus({ includeKimodoHelp: true });
-    const worker = await ensureKimodoWorker();
-    await refreshBackendStatus({ includeKimodoHelp: false });
-    const ok = result.backendStatus.kimodoHelp === "ok" && worker.ok && worker.body?.ok;
-    json(response, ok ? 200 : 502, { ok, ...result, worker: worker.body || worker });
   } else if (url.pathname === "/gpu-permission" && request.method === "GET") {
     json(response, 200, gpuTenancy.status());
   } else if (url.pathname === "/gpu-permission" && request.method === "POST") {
@@ -779,8 +740,7 @@ async function handleRequest(request, response) {
 }
 
 async function healthCheck() {
-  const host = args.host === "0.0.0.0" ? "127.0.0.1" : args.host;
-  const response = await fetch(`http://${host}:${args.port}/health`);
+  const response = await fetch(`http://${hosts[0]}:${args.port}/health`);
   if (!response.ok) throw new Error(`health returned ${response.status}`);
   const body = await response.json();
   if (!body.ok) throw new Error("health returned ok=false");
@@ -797,14 +757,12 @@ if (args.health) {
     process.exit(1);
   });
 } else {
+  if (hosts.length === 0 || hosts.includes("0.0.0.0") || hosts.includes("::")) {
+    console.error("--host must name the addresses to listen on, never a wildcard.");
+    process.exit(2);
+  }
   await mkdir(path.join(args.stateRoot, "jobs"), { recursive: true });
   await persistSurfaces();
-
-  const server = http.createServer((request, response) => {
-    handleRequest(request, response).catch((error) => {
-      json(response, 500, { ok: false, error: error.message, stack: process.env.NODE_ENV === "development" ? error.stack : undefined });
-    });
-  });
 
   const wss = new WebSocketServer({ noServer: true });
   wss.on("connection", (socket) => {
@@ -816,18 +774,27 @@ if (args.health) {
     socket.on("close", () => clearInterval(timer));
   });
 
-  server.on("upgrade", (request, socket, head) => {
-    const url = new URL(request.url, `http://${request.headers.host || `${args.host}:${args.port}`}`);
-    if (url.pathname === `/eve/deck/${providerId}` || url.pathname === "/eve/deck") {
-      wss.handleUpgrade(request, socket, head, (ws) => wss.emit("connection", ws, request));
-    } else {
-      socket.destroy();
-    }
+  const servers = hosts.map((host) => {
+    const server = http.createServer((request, response) => {
+      handleRequest(request, response).catch((error) => {
+        json(response, 500, { ok: false, error: error.message, stack: process.env.NODE_ENV === "development" ? error.stack : undefined });
+      });
+    });
+    server.on("upgrade", (request, socket, head) => {
+      const url = new URL(request.url, `http://${request.headers.host || `${hosts[0]}:${args.port}`}`);
+      if (url.pathname === `/eve/deck/${providerId}` || url.pathname === "/eve/deck") {
+        wss.handleUpgrade(request, socket, head, (ws) => wss.emit("connection", ws, request));
+      } else {
+        socket.destroy();
+      }
+    });
+    return new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(args.port, host, resolve);
+    });
   });
-
-  server.listen(args.port, args.host, () => {
-    console.log(`Vili listening on http://${args.host}:${args.port}`);
-  });
+  await Promise.all(servers);
+  console.log(`Vili listening on ${hosts.map((host) => `http://${host}:${args.port}`).join(" ")}`);
 
   setInterval(() => persistSurfaces().catch((error) => console.error(error)), 5000);
 }
