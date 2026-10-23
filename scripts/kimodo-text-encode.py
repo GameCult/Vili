@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """One-shot Kimodo text encoder: texts on stdin, vectors in --out, then exit so the OS reclaims its RAM.
 
-Reads {"texts": [...]} as JSON on stdin. Loads LLM2Vec assembly B on CPU in bfloat16, encodes each text alone as
-LLM2VecEncoder does, and writes a MessagePack answer. The torch thread budget is VILI_THREADS.
+Reads {"texts": [...]} as JSON on stdin. Loads the LLM2Vec encoder on CPU in bfloat16, wraps each text in the Llama-3 chat header, encodes it alone, and writes a MessagePack answer. The torch thread budget is VILI_THREADS.
 """
 import json
 import os
@@ -15,7 +14,7 @@ import msgpack
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from text_encoding import ASSEMBLY, EMBEDDING_DIM, LLAMA_BASE, apply_thread_cap, snapshot_path  # noqa: E402
+from text_encoding import ASSEMBLY, EMBEDDING_DIM, LLAMA_BASE, apply_thread_cap, chat_header, snapshot_path  # noqa: E402
 
 from peft import PeftModel  # noqa: E402
 from transformers import AutoConfig, AutoTokenizer  # noqa: E402
@@ -25,14 +24,11 @@ from kimodo.model.load_model import TEXT_ENCODER_PRESETS  # noqa: E402
 
 
 def load_encoder(hf_home, mntp_id, supervised_id, dtype):
-    """Assembly B: the Llama base with the MNTP adapter merged in, then the supervised adapter on top.
+    """The Llama base with the MNTP adapter merged in, then the supervised adapter on top (motion-pipeline:ruling:encoder-own-loader).
 
-    Kimodo's own LLM2VecEncoder loads the MNTP repo as the base (assembly A); this assembly is ours
-    (motion-pipeline:ruling:encoder-assembly-b). Everything loads from the local snapshot directories, as the
-    research's reference vector did: the model's _name_or_path is then a path, not the repo id, so
-    LLM2Vec.prepare_for_tokenization does not wrap the text in Llama's chat header, which is what separates B's
-    vector from A's. The identity carries the Kimodo commit and this file's sha256, so a changed loader misses.
-    """
+    Everything loads from the local snapshot directories, so the model's _name_or_path is a path and LLM2Vec never
+    adds the chat header itself; main() wraps every text with chat_header, so the prompt form is ours and no
+    side effect of the load decides it. The identity carries the Kimodo commit and this file's sha256."""
     llama, mntp, supervised = (snapshot_path(hf_home, repo) for repo in (LLAMA_BASE, mntp_id, supervised_id))
     tokenizer = AutoTokenizer.from_pretrained(llama)
     tokenizer.pad_token = tokenizer.eos_token
@@ -60,7 +56,7 @@ def main() -> int:
     vectors, encode_seconds = [], []
     for text in texts:
         began = time.perf_counter()
-        features = model.tokenize([model.prepare_for_tokenization(model._convert_to_str("", text))])
+        features = model.tokenize([chat_header(text)])
         with torch.no_grad():
             vector = model.forward(features).detach().cpu().to(torch.float32)[0]
         assert vector.shape == (EMBEDDING_DIM,)

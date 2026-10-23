@@ -26,7 +26,12 @@ EMBEDDING_DIM = 4096
 EMBEDDING_BYTES = EMBEDDING_DIM * 4
 CHILD_PATH = Path(__file__).with_name("kimodo-text-encode.py")
 LLAMA_BASE = "meta-llama/Meta-Llama-3-8B-Instruct"  # the base model both LLM2Vec adapters are applied to
-ASSEMBLY = "llm2vec-B-mntp-merged-then-supervised"
+ASSEMBLY = "llm2vec-mntp-merged-then-supervised"
+# Llama-3 Instruct's chat header, applied by Vili's own code (motion-pipeline:ruling:encoder-chat-header-on): the
+# text goes in as a user turn, as LLM2Vec does for this model when it is loaded from the repo id.
+CHAT_HEADER_PREFIX = "<|start_header_id|>user<|end_header_id|>\n\n"
+CHAT_HEADER_SUFFIX = "<|eot_id|>"
+PROMPT_FORM = "llama3-chat-header:" + hashlib.sha256((CHAT_HEADER_PREFIX + "|" + CHAT_HEADER_SUFFIX).encode("utf-8")).hexdigest()
 MAX_THREADS = 16
 
 
@@ -55,17 +60,44 @@ def snapshot_path(hf_home: Path, repo_id: str) -> Path:
     return Path(hf_home) / "hub" / ("models--" + repo_id.replace("/", "--")) / "snapshots" / read_snapshot_revision(hf_home, repo_id)
 
 
-def encoder_identity(*, assembly: str, device: str, revisions: dict, dtype: str, torch_version: str, transformers_version: str,
-                     peft_version: str, accelerate_version: str, kimodo_commit: str, loader_sha256: str) -> str:
+def chat_header(text: str) -> str:
+    """The text as the encoder reads it: a user turn in Llama-3 Instruct's chat format."""
+    return CHAT_HEADER_PREFIX + text.strip() + CHAT_HEADER_SUFFIX
+
+
+def encoder_identity(*, assembly: str, prompt_form: str, device: str, revisions: dict, dtype: str, torch_version: str,
+                     transformers_version: str, peft_version: str, accelerate_version: str, kimodo_commit: str,
+                     loader_sha256: str) -> str:
     """The canonical string a vector is keyed under: every input that can change it, in a fixed field order.
 
     Thread count is provenance, not identity; the encoder child's own bytes are, through loader_sha256."""
     parts = [f"{repo}@{revision}" for repo, revision in sorted(revisions.items())]
     parts += [
-        f"assembly={assembly}", f"device={device}", f"dtype={dtype}", f"torch={torch_version}", f"transformers={transformers_version}",
+        f"assembly={assembly}", f"prompt={prompt_form}", f"device={device}", f"dtype={dtype}", f"torch={torch_version}", f"transformers={transformers_version}",
         f"peft={peft_version}", f"accelerate={accelerate_version}", f"kimodo={kimodo_commit}", f"loader={loader_sha256}",
     ]
     return ";".join(parts)
+
+
+def installed_versions() -> dict:
+    """The versions of the libraries that load and run the encoder, read from the installed packages."""
+    import accelerate
+    import peft
+    import transformers
+    return {"torch": torch.__version__, "transformers": transformers.__version__, "peft": peft.__version__, "accelerate": accelerate.__version__}
+
+
+def live_identity(hf_home, preset: dict, kimodo_commit: str, versions: dict) -> str:
+    """The identity the worker keys vectors under: the three snapshot revisions the mounted cache names, the preset's
+    dtype, the library versions, the Kimodo commit and the sha256 of the encoder child's own bytes."""
+    repos = (preset["base_model_name_or_path"], preset["peft_model_name_or_path"], LLAMA_BASE)
+    return encoder_identity(
+        assembly=ASSEMBLY, prompt_form=PROMPT_FORM, device="cpu",
+        revisions={repo: read_snapshot_revision(hf_home, repo) for repo in repos},
+        dtype=preset["dtype"], torch_version=versions["torch"], transformers_version=versions["transformers"],
+        peft_version=versions["peft"], accelerate_version=versions["accelerate"], kimodo_commit=kimodo_commit,
+        loader_sha256=hashlib.sha256(CHILD_PATH.read_bytes()).hexdigest(),
+    )
 
 
 def embedding_key(identity: str, text: str) -> str:

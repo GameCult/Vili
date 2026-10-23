@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import hashlib
 import json
 import os
 import shutil
@@ -10,10 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
 from types import SimpleNamespace
 
-import accelerate
-import peft
 import torch
-import transformers
 from huggingface_hub.constants import HF_HOME
 
 from kimodo import DEFAULT_MODEL, load_model
@@ -51,20 +47,8 @@ model_load_started_at = time.time()
 preset = TEXT_ENCODER_PRESETS["llm2vec"]["kwargs"]
 kimodo_commit = os.environ["VILI_KIMODO_COMMIT"]
 python_env = os.environ["VILI_PYTHON_ENV"]
-encoder_identity = text_encoding.encoder_identity(
-    assembly=text_encoding.ASSEMBLY,
-    device=device,
-    revisions={
-        repo: text_encoding.read_snapshot_revision(HF_HOME, repo)
-        for repo in (preset["base_model_name_or_path"], preset["peft_model_name_or_path"], text_encoding.LLAMA_BASE)
-    },
-    dtype=preset["dtype"],
-    torch_version=torch.__version__,
-    transformers_version=transformers.__version__,
-    peft_version=peft.__version__,
-    accelerate_version=accelerate.__version__,
-    kimodo_commit=kimodo_commit,
-    loader_sha256=hashlib.sha256(text_encoding.CHILD_PATH.read_bytes()).hexdigest(),
+encoder_identity = text_encoding.live_identity(
+    HF_HOME, preset, kimodo_commit, text_encoding.installed_versions(),
 )
 # The 8B encoder never lives here: misses go to a one-shot child (kimodo-text-encode.py), hits come from the store.
 text_encoder = text_encoding.CachedTextEncoder(

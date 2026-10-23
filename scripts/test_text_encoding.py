@@ -1,4 +1,7 @@
 """Run inside the Kimodo image: python -m unittest discover -s /opt/vili -p test_text_encoding.py"""
+import hashlib
+import os
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -43,26 +46,82 @@ class Identity(unittest.TestCase):
         self.assertNotEqual(te.embedding_key("a", "x"), te.embedding_key("a", "y"))
         self.assertNotEqual(te.embedding_key("ab", "x"), te.embedding_key("a", "bx"))
 
+    def test_key_is_a_full_sha256_over_the_whole_text(self):
+        key = te.embedding_key("id", "text a")
+        self.assertEqual(len(key), 64)
+        int(key, 16)
+        self.assertNotEqual(key, te.embedding_key("id", "text b"))
+
+    def test_chat_header_is_the_llama3_user_turn(self):
+        self.assertEqual(te.chat_header("  hello  "), "<|start_header_id|>user<|end_header_id|>" + chr(10) * 2 + "hello<|eot_id|>")
+        form = hashlib.sha256(("<|start_header_id|>user<|end_header_id|>" + chr(10) * 2 + "|<|eot_id|>").encode("utf-8")).hexdigest()
+        self.assertEqual(te.PROMPT_FORM, "llama3-chat-header:" + form)
+
     def test_every_identity_field_changes_the_key(self):
-        # The repos' names alone exceed 40 characters, so a key built from a truncated identity cannot tell
-        # the later fields apart: each field here sits past that point.
-        base = dict(
-            assembly=te.ASSEMBLY, device="cpu", revisions={"r/one": "111", "r/two": "222", "r/three": "333"}, dtype="bfloat16",
+        # Built the way the worker builds it, from a mounted cache with 40-hex revisions, so the first 268 characters
+        # are the revisions and every other field sits past any prefix a truncated identity could keep.
+        preset = {"base_model_name_or_path": "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp", "peft_model_name_or_path":
+                  "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-supervised", "dtype": "bfloat16"}
+        versions = {"torch": "2.5.1+cpu", "transformers": "5.1.0", "peft": "0.18.1", "accelerate": "1.13.0"}
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as bytes_dir:
+            loader = Path(bytes_dir) / "child.py"
+            loader.write_bytes(b"one")
+            repos = [preset["base_model_name_or_path"], preset["peft_model_name_or_path"], te.LLAMA_BASE]
+            revision = {repo: f"{index}" * 40 for index, repo in enumerate(repos, start=1)}
+
+            def write_revision(repo, value):
+                refs = Path(home) / "hub" / ("models--" + repo.replace("/", "--")) / "refs"
+                refs.mkdir(parents=True, exist_ok=True)
+                (refs / "main").write_text(value + chr(10))
+
+            for repo in repos:
+                write_revision(repo, revision[repo])
+            real_child = te.CHILD_PATH
+            te.CHILD_PATH = loader
+            try:
+                def identity(preset=preset, commit="6bb5848", versions=versions):
+                    return te.live_identity(home, preset, commit, versions)
+
+                base = identity()
+                self.assertGreater(base.index("assembly="), 200)
+                changed = {
+                    "dtype": identity(preset={**preset, "dtype": "float32"}),
+                    "kimodo": identity(commit="abcdef0"),
+                    **{f"version:{name}": identity(versions={**versions, name: "9.9.9"}) for name in versions},
+                }
+                for repo in repos:
+                    write_revision(repo, "f" * 40)
+                    changed[f"revision:{repo}"] = identity()
+                    write_revision(repo, revision[repo])
+                loader.write_bytes(b"two")
+                changed["loader"] = identity()
+                loader.write_bytes(b"one")
+                self.assertEqual(identity(), base)
+            finally:
+                te.CHILD_PATH = real_child
+            self.assertEqual(len(changed), 9)
+            for field, other in changed.items():
+                self.assertNotEqual(te.embedding_key(base, "x"), te.embedding_key(other, "x"), field)
+            for field in ("assembly", "prompt", "device"):
+                self.assertIn(f"{field}=", base)
+
+    def test_assembly_prompt_and_device_change_the_key(self):
+        fields = dict(
+            assembly=te.ASSEMBLY, prompt_form=te.PROMPT_FORM, device="cpu", revisions={"r/one": "1" * 40}, dtype="bfloat16",
             torch_version="2.5.1+cpu", transformers_version="5.1.0", peft_version="0.18.1", accelerate_version="1.13.0",
             kimodo_commit="6bb5848", loader_sha256="a" * 64,
         )
-        key = te.embedding_key(te.encoder_identity(**base), "x")
-        changes = dict(
-            assembly="llm2vec-A", device="other-device", dtype="float32", torch_version="2.6.0+cpu", transformers_version="5.2.0",
-            peft_version="0.19.0", accelerate_version="1.14.0", kimodo_commit="abcdef0", loader_sha256="b" * 64,
-        )
-        for repo in base["revisions"]:
-            changes[f"revision:{repo}"] = {**base["revisions"], repo: "999"}
-        self.assertEqual(len(changes), 12)
-        for field, other in changes.items():
-            name = "revisions" if field.startswith("revision:") else field
-            changed = te.embedding_key(te.encoder_identity(**{**base, name: other}), "x")
-            self.assertNotEqual(key, changed, field)
+        key = te.embedding_key(te.encoder_identity(**fields), "x")
+        for name, other in (("assembly", "llm2vec-A"), ("prompt_form", "none"), ("device", "cuda")):
+            self.assertNotEqual(key, te.embedding_key(te.encoder_identity(**{**fields, name: other}), "x"), name)
+
+    def test_installed_versions_are_the_libraries_in_use(self):
+        import accelerate
+        import peft
+        import transformers
+        self.assertEqual(te.installed_versions(), {
+            "torch": te.torch.__version__, "transformers": transformers.__version__, "peft": peft.__version__, "accelerate": accelerate.__version__,
+        })
 
     def test_snapshot_revision_is_read_from_the_mounted_cache(self):
         with tempfile.TemporaryDirectory() as home:
@@ -179,6 +238,10 @@ class ThreadCap(unittest.TestCase):
         source = (Path(te.__file__).with_name("kimodo-text-encode.py")).read_text()
         self.assertLess(source.index("apply_thread_cap(os.environ)"), source.index("load_encoder(os.environ"))
 
+    def test_the_worker_caps_interop_threads_before_it_loads_the_model(self):
+        source = (Path(te.__file__).with_name("kimodo-resident-worker.py")).read_text()
+        self.assertLess(source.index("torch.set_num_interop_threads(1)"), source.index("model, resolved_model = load_model("))
+
     def test_the_worker_applies_the_cap_before_it_loads_the_model(self):
         source = (Path(te.__file__).with_name("kimodo-resident-worker.py")).read_text()
         self.assertLess(source.index("text_encoding.apply_thread_cap(os.environ)"), source.index("model, resolved_model = load_model("))
@@ -206,6 +269,37 @@ class ChildBoundary(unittest.TestCase):
         """, texts=("aa", "bb"))
         self.assertEqual(answer["texts_seen"], ["aa", "bb"])
         self.assertEqual(len(answer["vectors"]), 2)
+
+
+REFERENCE_MODELS = os.environ.get("VILI_REFERENCE_MODELS")
+ROCK = "A person shakes their fist up and down three times, then thrusts a closed fist forward like a rock."
+REFERENCE_CODE = """
+import sys, numpy as np
+from kimodo.model.load_model import TEXT_ENCODER_PRESETS
+from kimodo.model.llm2vec.llm2vec_wrapper import LLM2VecEncoder
+kwargs = TEXT_ENCODER_PRESETS["llm2vec"]["kwargs"]
+encoder = LLM2VecEncoder(**kwargs, device="cpu")
+vector, _ = encoder(sys.argv[2])
+np.save(sys.argv[1], vector.float().numpy().reshape(-1))
+"""
+
+
+@unittest.skipUnless(REFERENCE_MODELS, "set VILI_REFERENCE_MODELS to a Hugging Face cache with the three repos (Yggdrasil)")
+class ReferenceVector(unittest.TestCase):
+    """The encoder child, in a fresh process, against Kimodo's own encoder loaded from the repo ids (which applies the chat header)."""
+
+    def test_the_child_vector_matches_kimodo_with_the_chat_header(self):
+        import numpy as np
+        env = {**os.environ, "HF_HOME": REFERENCE_MODELS, "HF_HUB_OFFLINE": "1", "VILI_THREADS": os.environ.get("VILI_THREADS", "8")}
+        with tempfile.TemporaryDirectory() as directory:
+            reference = Path(directory) / "reference.npy"
+            subprocess.run([sys.executable, "-c", REFERENCE_CODE, str(reference), ROCK], env=env, check=True)
+            os.environ.update(env)
+            ours = np.frombuffer(te.run_child([ROCK], Path(directory) / "answer.mp")["vectors"][0], dtype=np.float32)
+        expected = np.load(reference)
+        cosine = float(ours @ expected / (np.linalg.norm(ours) * np.linalg.norm(expected)))
+        print("cosine to Kimodo from repo ids:", cosine)
+        self.assertGreaterEqual(cosine, 0.9999)
 
 
 if __name__ == "__main__":
