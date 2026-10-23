@@ -3,8 +3,9 @@
 // sets VILI_GPU_MIN_FREE_MIB=999999 so an allowed request ends in a VRAM refusal and never starts
 // the worker: no test here may start a GPU job.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { copyFile, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -183,6 +184,96 @@ test("http: a web page cannot flip the household's switch or start a job", async
   } finally {
     await d.stop();
     await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+// The daemon reaches the GPU only through the processes wsl.exe and nvidia-smi.exe. This test puts
+// one small compiled stub on PATH under both names (Windows, where the daemon lives), so the real
+// daemon runs a real job against a worker that takes as long as the test says and touches no GPU:
+// nvidia-smi.exe answers 20000 free MiB, the worker health call answers ok, and the "/generate"
+// call waits until the test creates a release file.
+const stubSource = `
+using System; using System.IO; using System.Reflection; using System.Threading;
+class Stub {
+  static int Main(string[] args) {
+    string exe = Path.GetFileNameWithoutExtension(Assembly.GetEntryAssembly().Location).ToLowerInvariant();
+    string dir = Environment.GetEnvironmentVariable("VILI_STUB_DIR");
+    if (exe == "nvidia-smi") { Console.WriteLine("20000"); return 0; }
+    string script = args.Length > 0 ? args[args.Length - 1] : "";
+    if (script.Contains("/health")) { Console.WriteLine("{\\"ok\\":true,\\"model\\":\\"stub\\"}"); return 0; }
+    if (script.Contains("/generate")) {
+      File.AppendAllText(Path.Combine(dir, "started"), "x");
+      while (!File.Exists(Path.Combine(dir, "release"))) Thread.Sleep(25);
+      Console.WriteLine("{\\"ok\\":true}");
+    }
+    return 0;
+  }
+}`;
+
+async function stubbedDaemon(stubDir, stateRoot) {
+  const source = path.join(stubDir, "stub.cs");
+  await writeFile(source, stubSource);
+  const build = path.join(stubDir, "build.ps1");
+  await writeFile(build, [
+    "param($Source, $Out)",
+    "Add-Type -TypeDefinition (Get-Content -Raw $Source) -OutputAssembly $Out -OutputType ConsoleApplication",
+  ].join("\r\n"));
+  const built = spawnSync("powershell.exe", [
+    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", build, source, path.join(stubDir, "wsl.exe"),
+  ], { encoding: "utf8", windowsHide: true });
+  assert.equal(built.status, 0, `the stub did not compile: ${built.stderr || built.stdout}`);
+  await copyFile(path.join(stubDir, "wsl.exe"), path.join(stubDir, "nvidia-smi.exe"));
+  const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") ?? "PATH";
+  return bootDaemon(stateRoot, {
+    env: {
+      [pathKey]: `${stubDir}${path.delimiter}${process.env[pathKey]}`,
+      VILI_STUB_DIR: stubDir,
+      VILI_GPU_MIN_FREE_MIB: "1",
+    },
+  });
+}
+
+test("http: the daemon holds the slot for the whole job", async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), "vili-gate-hold-"));
+  const stubDir = await mkdtemp(path.join(os.tmpdir(), "vili-gate-stub-"));
+  const d = await stubbedDaemon(stubDir, stateRoot);
+  const prompt = { prompt: "a person waves hello, never seen before" };
+  const within = (promise, ms, what) => Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${what} did not answer within ${ms} ms`)), ms)),
+  ]);
+  try {
+    await setPermission(d, { allowed: true });
+    const first = generate(d, prompt);
+    const deadline = Date.now() + 20000;
+    while (!(await readPermission(d)).jobRunning) {
+      assert.ok(Date.now() < deadline, "the first job never took the slot");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    while (!existsSync(path.join(stubDir, "started"))) {
+      assert.ok(Date.now() < deadline, "the first job never reached the worker");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    for (let i = 0; i < 3; i += 1) {
+      const second = await within(generate(d, prompt), 5000, "a request during the job");
+      assert.equal(second.status, 503, "a request during the job is refused at once");
+      assert.deepEqual(await second.json(), { ok: false, code: "gpu-busy", source: "slot" });
+    }
+    assert.equal(readFileSync(path.join(stubDir, "started"), "utf8"), "x", "exactly one job reached the worker");
+    assert.equal((await readPermission(d)).jobRunning, true, "the slot is still held");
+
+    await writeFile(path.join(stubDir, "release"), "");
+    const done = await within(first, 20000, "the first job");
+    assert.equal(done.status, 200);
+    assert.equal((await readPermission(d)).jobRunning, false, "the slot frees when the job ends");
+    const next = await within(generate(d, prompt), 20000, "the next job");
+    assert.equal(next.status, 200, "the next job is admitted after the slot frees");
+    assert.equal(readFileSync(path.join(stubDir, "started"), "utf8"), "xx");
+  } finally {
+    await d.stop();
+    await rm(stateRoot, { recursive: true, force: true });
+    await rm(stubDir, { recursive: true, force: true });
   }
 });
 
