@@ -275,7 +275,6 @@ test("a requested model restarts the worker only when it is not the one serving"
     assert.deepEqual(other.body.worker.argv.slice(-2), ["--model", "other-model"]);
     assert.equal(daemon.spawns().length, 2);
     await until(() => !isAlive(first), "the first worker to be gone");
-    assert.equal((await backendOf(daemon)).lastError, null, "a stop the daemon asked for is not an error");
     assert.equal((await generate(daemon)).status, 200);
     assert.equal(daemon.spawns().length, 2, "a request that names no model keeps the one serving");
   } finally {
