@@ -38,17 +38,20 @@ function isAlive(pid) {
   }
 }
 
-async function startDaemon({ omit = [], viaEnv = false, threads = String(THREADS), python = process.execPath, nested = false } = {}) {
+async function startDaemon({
+  omit = [], viaEnv = false, threads = String(THREADS), python = process.execPath, nested = false, host = "127.0.0.1",
+  relativeModels = false, extraArgs = [],
+} = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), "vili-test-"));
   const stateRoot = nested ? path.join(root, "a", "b", "state") : root;
   const modelsRoot = path.join(root, "models");
   const settings = {
-    host: "127.0.0.1",
+    host,
     port: "0",
     "state-root": stateRoot,
     python,
     "worker-entry": stubPath,
-    "models-root": modelsRoot,
+    "models-root": relativeModels ? "models-rel" : modelsRoot,
     "kimodo-commit": "abc1234",
     "python-env": "test-env",
   };
@@ -56,17 +59,18 @@ async function startDaemon({ omit = [], viaEnv = false, threads = String(THREADS
   for (const name of omit) delete settings[name];
   const env = { ...process.env, LEAK_CHECK: "leaked", LANG: "xx_TEST.UTF-8" };
   for (const name of Object.keys(env)) if (name.startsWith("VILI_")) delete env[name];
-  const argv = [daemonPath];
+  const argv = [daemonPath, ...extraArgs];
   for (const [name, value] of Object.entries(settings)) {
     if (viaEnv) env[`VILI_${{ host: "DAEMON_HOST", port: "DAEMON_PORT", "state-root": "STATE_ROOT", "worker-entry": "WORKER_ENTRY" }[name] ?? name.toUpperCase().replace("-", "_")}`] = value;
     else argv.push(`--${name}`, value);
   }
-  const proc = spawn(process.execPath, argv, { env, stdio: ["ignore", "pipe", "pipe"] });
+  const proc = spawn(process.execPath, argv, { env, cwd: root, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
   let errors = "";
   proc.stdout.on("data", (chunk) => { output += chunk; });
   proc.stderr.on("data", (chunk) => { errors += chunk; });
-  const port = await until(() => /listening on http:\/\/127\.0\.0\.1:(\d+)/.exec(output)?.[1], "the daemon to listen");
+  const listening = await until(() => /listening on http:\/\/([^:]+):(\d+)/.exec(output), "the daemon to listen");
+  const port = listening[2];
   const spawnLog = () => {
     const log = path.join(stateRoot, "embeddings", "stub-spawns.log");
     return existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : [];
@@ -75,6 +79,7 @@ async function startDaemon({ omit = [], viaEnv = false, threads = String(THREADS
     stateRoot,
     modelsRoot,
     proc,
+    boundHost: listening[1],
     port: Number(port),
     stderr: () => errors,
     spawns: () => spawnLog().filter((line) => /^\d+$/.test(line)).map(Number),
@@ -242,6 +247,7 @@ test("a job is a record on disk", async () => {
     assert.equal(job.error, null);
     assert.equal(job.artifactDir, path.join(daemon.stateRoot, "artifacts", job.jobId));
     assert.equal(job.worker.output, path.join(job.artifactDir, "motion"));
+    assert.equal(job.worker.contentType, "application/json");
     assert.equal(job.worker.prompt, "a person waves");
     assert.equal(job.worker.constraints, path.join(job.artifactDir, "constraints.json"));
     assert.deepEqual(JSON.parse(readFileSync(job.worker.constraints, "utf8")), [{ type: "root2d" }]);
@@ -269,6 +275,7 @@ test("a requested model restarts the worker only when it is not the one serving"
     assert.deepEqual(other.body.worker.argv.slice(-2), ["--model", "other-model"]);
     assert.equal(daemon.spawns().length, 2);
     await until(() => !isAlive(first), "the first worker to be gone");
+    assert.equal((await backendOf(daemon)).lastError, null, "a stop the daemon asked for is not an error");
     assert.equal((await generate(daemon)).status, 200);
     assert.equal(daemon.spawns().length, 2, "a request that names no model keeps the one serving");
   } finally {
@@ -284,13 +291,67 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
       const [pid] = daemon.spawns();
       assert.ok(isAlive(pid));
       daemon.proc.kill(signal);
-      await until(() => daemon.proc.exitCode !== null, "the daemon to exit");
+      await until(() => daemon.proc.exitCode !== null, "the daemon to exit", 8);
       assert.equal(isAlive(pid), false);
     } finally {
       await daemon.stop();
     }
   });
 }
+
+test("a worker that is stopping gets its grace, not a SIGKILL", async () => {
+  const daemon = await startDaemon();
+  try {
+    assert.equal((await generate(daemon, { prompt: "x", model: "graceful" })).status, 200);
+    daemon.proc.kill("SIGTERM");
+    await until(() => daemon.proc.exitCode !== null, "the daemon to exit", 8);
+    assert.ok(readFileSync(path.join(daemon.stateRoot, "embeddings", "stub-spawns.log"), "utf8").includes("graceful-exit"));
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("a worker that dies while the daemon waits for its health fails the job at once", async () => {
+  const daemon = await startDaemon();
+  try {
+    const began = Date.now();
+    const failed = await generate(daemon, { prompt: "x", model: "die-after-ready" });
+    assert.equal(failed.status, 502);
+    assert.ok(Date.now() - began < 20000, "the default deadline is minutes; a dead worker does not wait for it");
+    const backend = await backendOf(daemon);
+    assert.equal(backend.state, "stopped");
+    assert.equal(backend.lastError, "the worker exited (code 4)");
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("the daemon binds loopback unless told otherwise, and ignores flags it does not know", async () => {
+  const byDefault = await startDaemon({ omit: ["host"], extraArgs: ["--bogus"] });
+  try {
+    assert.equal(byDefault.boundHost, "127.0.0.1");
+    assert.equal((await request(byDefault.port, "GET", "/health")).status, 200);
+  } finally {
+    await byDefault.stop();
+  }
+  const named = await startDaemon({ host: "127.0.0.2" });
+  try {
+    assert.equal(named.boundHost, "127.0.0.2");
+    assert.equal((await fetch(`http://127.0.0.2:${named.port}/health`)).status, 200);
+  } finally {
+    await named.stop();
+  }
+});
+
+test("a relative models root reaches the worker as an absolute path", async () => {
+  const daemon = await startDaemon({ relativeModels: true });
+  try {
+    const { env } = (await generate(daemon)).body.worker;
+    assert.equal(env.HF_HOME, path.join(path.dirname(daemon.modelsRoot), "models-rel"));
+  } finally {
+    await daemon.stop();
+  }
+});
 
 test("a worker that ignores SIGTERM is killed with everything it started", async () => {
   const daemon = await startDaemon();
@@ -330,6 +391,13 @@ test("cross-site is refused before the worker", async () => {
     assert.equal((await request(backend.port, "GET", "/health")).body.requests, 1, "only the same-site request reached the worker");
     // the media type is matched as a type, not as a string
     assert.equal((await generate(daemon, undefined, { "content-type": "Application/JSON; charset=utf-8" })).status, 200);
+    assert.equal((await generate(daemon, undefined, { "content-type": "application/json ; charset=utf-8" })).status, 200);
+    // and only the generate route answers a POST
+    const stray = await request(daemon.port, "POST", "/motion/other", {
+      body: JSON.stringify({ prompt: "x" }),
+      headers: { "content-type": "application/json" },
+    });
+    assert.equal(stray.status, 404);
   } finally {
     await daemon.stop();
   }

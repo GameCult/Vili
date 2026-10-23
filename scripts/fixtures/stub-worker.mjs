@@ -1,7 +1,7 @@
 // Stands in for kimodo-resident-worker.py in the daemon's tests. It binds port 0, prints the ready line the
 // daemon waits for, and answers /health and /generate with what the daemon gave it. The --model value picks a
 // misbehaviour: crash-before-ready, hang-before-ready, sick, slow-health, stubborn, fail-generate,
-// refuse-generate, drop-generate, slow-generate. Any other value is just the model the worker serves.
+// refuse-generate, drop-generate, slow-generate, graceful (exits 0.5 s after SIGTERM), die-after-ready. Any other value is just the model the worker serves.
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -33,6 +33,15 @@ if (model === "stubborn") {
   appendFileSync(spawnLog, `grandchild ${grandchild.pid}\n`);
 }
 
+if (model === "graceful") {
+  process.on("SIGTERM", () => {
+    setTimeout(() => {
+      appendFileSync(spawnLog, "graceful-exit\n");
+      process.exit(0);
+    }, 500);
+  });
+}
+
 if (model === "hang-before-ready") {
   setInterval(() => {}, 1000);
 } else {
@@ -46,7 +55,7 @@ if (model === "hang-before-ready") {
       };
       if (request.method === "GET" && request.url === "/health") {
         healthCalls += 1;
-        if (model === "sick" || (model === "slow-health" && healthCalls <= 2)) return send(200, { ok: false });
+        if (model === "sick" || model === "die-after-ready" || (model === "slow-health" && healthCalls <= 2)) return send(200, { ok: false });
         send(200, { ok: true, model: model || "stub-model", displayModel: model || "Stub Model", pid: process.pid, requests });
       } else if (request.method === "POST" && request.url === "/generate") {
         requests += 1;
@@ -60,6 +69,7 @@ if (model === "hang-before-ready") {
           model: model || "stub-model",
           pid: process.pid,
           requests,
+          contentType: request.headers["content-type"],
           output: payload.output,
           prompt: payload.prompt,
           constraints: payload.constraints,
@@ -92,5 +102,6 @@ if (model === "hang-before-ready") {
 
   server.listen(Number(flag("--port")), flag("--host"), () => {
     console.log(JSON.stringify({ event: "kimodo-worker-ready", port: server.address().port }));
+    if (model === "die-after-ready") setTimeout(() => process.exit(4), 300);
   });
 }

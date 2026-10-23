@@ -114,7 +114,7 @@ const args = parseArgs(process.argv.slice(2));
 const startedAt = new Date().toISOString();
 
 // The worker child. Display state only: nothing reads `worker` to decide anything but ensureWorker.
-const worker = { state: "stopped", proc: null, pid: null, port: null, model: null, servedModels: [], lastError: null };
+const worker = { state: "stopped", proc: null, pid: null, port: null, servedModels: [], lastError: null };
 let starting = null;
 
 function firstDefined(...values) {
@@ -322,7 +322,7 @@ async function startWorker(model, timeoutMs) {
     detached: true,
   });
   closeSync(logFd);
-  Object.assign(worker, { state: "starting", proc, pid: proc.pid ?? null, port: null, model: model || null, servedModels: [], lastError: null });
+  Object.assign(worker, { state: "starting", proc, pid: proc.pid ?? null, port: null, servedModels: [], lastError: null });
   const exited = new Promise((resolve) => {
     proc.once("error", () => resolve("the worker could not be spawned"));
     proc.once("exit", (code, signal) => resolve(`the worker exited (${signal ?? `code ${code}`})`));
