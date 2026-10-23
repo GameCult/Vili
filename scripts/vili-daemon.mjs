@@ -547,8 +547,21 @@ async function readRequestBody(request) {
 
 const loopbackAddresses = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
+// A state-changing POST is a service's or the tray's call, never a web page's. A browser sends a
+// cross-site page's POST as a no-preflight simple request (text/plain) or with an Origin that is not
+// ours, so both are refused before the body is read. The daemon grants no CORS preflight at all.
+function refuseCrossSite(request, response) {
+  const origin = request.headers.origin;
+  const ownOrigins = [`http://127.0.0.1:${args.port}`, `http://localhost:${args.port}`, `http://[::1]:${args.port}`];
+  const type = String(request.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
+  if (type === "application/json" && (origin === undefined || ownOrigins.includes(origin))) return false;
+  json(response, 403, { ok: false, code: "cross-site" });
+  return true;
+}
+
 // The household's switch: only a caller on this machine (the tray, in the household's session) sets it.
 async function setGpuPermission(request, response) {
+  if (refuseCrossSite(request, response)) return;
   if (!loopbackAddresses.has(request.socket.remoteAddress)) {
     json(response, 403, { ok: false, code: "household-only" });
     return;
@@ -568,6 +581,7 @@ async function setGpuPermission(request, response) {
 }
 
 async function generateMotion(request, response) {
+  if (refuseCrossSite(request, response)) return;
   let body;
   try {
     body = await readRequestBody(request);
@@ -729,16 +743,6 @@ async function runMotionJob(body, prompt, response) {
 
 async function handleRequest(request, response) {
   const url = new URL(request.url, `http://${request.headers.host || `${args.host}:${args.port}`}`);
-  if (request.method === "OPTIONS") {
-    response.writeHead(204, {
-      "access-control-allow-origin": "*",
-      "access-control-allow-methods": "GET,POST,OPTIONS",
-      "access-control-allow-headers": "content-type",
-    });
-    response.end();
-    return;
-  }
-
   if (url.pathname === "/" || url.pathname === "/health") {
     await refreshBackendStatus({ includeKimodoHelp: false });
     json(response, 200, { ok: true, service: "vili", providerId, state: operatorState() });

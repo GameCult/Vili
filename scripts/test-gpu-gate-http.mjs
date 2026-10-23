@@ -144,6 +144,48 @@ test("http: the switch is the household's", async () => {
   }
 });
 
+test("http: a web page cannot flip the household's switch or start a job", async () => {
+  const stateRoot = await mkdtemp(path.join(os.tmpdir(), "vili-gate-csrf-"));
+  const d = await bootDaemon(stateRoot);
+  const post = (route, headers, body) => fetch(url(d, route), { method: "POST", headers, body });
+  const prompt = JSON.stringify({ prompt: "a person waves hello, never seen before" });
+  try {
+    const before = await readPermission(d);
+    for (const route of ["/gpu-permission", "/motion/generate"]) {
+      const payload = route === "/gpu-permission" ? JSON.stringify({ allowed: true }) : prompt;
+      const simple = await post(route, { "content-type": "text/plain" }, payload);
+      assert.equal(simple.status, 403, `${route}: a simple text/plain POST`);
+      assert.deepEqual(await simple.json(), { ok: false, code: "cross-site" });
+      assert.equal((await post(route, {}, payload)).status, 403, `${route}: no content-type`);
+      const hostile = await post(route, { "content-type": "application/json", origin: "http://evil.example-origin" }, payload);
+      assert.equal(hostile.status, 403, `${route}: a hostile Origin`);
+      const body = JSON.stringify(await hostile.json());
+      assert.equal(body.includes("evil.example-origin"), false, "the refusal never echoes the Origin");
+      assert.equal(
+        (await post(route, { "content-type": "application/json", origin: `http://127.0.0.1:${d.port}.evil.example` }, payload)).status,
+        403,
+        `${route}: an Origin that only starts like ours`,
+      );
+    }
+    assert.deepEqual(await readPermission(d), before, "no refused request changed anything");
+    assert.deepEqual(await readdir(path.join(stateRoot, "jobs")), [], "no job file");
+
+    const preflight = await fetch(url(d, "/gpu-permission"), {
+      method: "OPTIONS",
+      headers: { origin: "http://evil.example-origin", "access-control-request-method": "POST", "access-control-request-headers": "content-type" },
+    });
+    assert.equal(preflight.ok, false, "the daemon approves no CORS preflight");
+    assert.equal(preflight.headers.get("access-control-allow-methods"), null);
+
+    const own = await post("/gpu-permission", { "content-type": "application/json; charset=utf-8", origin: `http://127.0.0.1:${d.port}` }, JSON.stringify({ allowed: true }));
+    assert.equal(own.status, 200, "the daemon's own origin still works");
+    assert.equal((await setPermission(d, { allowed: false })).status, 200, "a caller with no Origin (the tray) still works");
+  } finally {
+    await d.stop();
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
 test("http: a malformed override refuses to start and names the variable, not its value", async () => {
   const stateRoot = await mkdtemp(path.join(os.tmpdir(), "vili-gate-env-"));
   const child = spawn(process.execPath, [daemonPath, "--host", "127.0.0.1", "--port", String(nextPort++), "--state-root", stateRoot], {
