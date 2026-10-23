@@ -27,35 +27,13 @@ class FakeChild:
         return {
             "vectors": [vector(len(text)) for text in texts],
             "encodeSeconds": [0.5] * len(texts),
-            "placement": {"gpuBytes": 11 * GIB, "cpuBytes": 5 * GIB},
+            "placement": {"cpuBytes": 5 * GIB},
         }
 
 
 def open_encoder(directory, child, identity="id-a"):
     store = te.open_store(Path(directory) / "embeddings.cc")
     return te.CachedTextEncoder(store, identity, child)
-
-
-class PlanPlacement(unittest.TestCase):
-    def test_refuses_below_two_gib_with_a_typed_error_and_no_cpu_placement(self):
-        for free in (0, 1 * GIB, int(1.5 * GIB), 2 * GIB - 1):
-            with self.assertRaises(te.GpuBusy) as raised:
-                te.plan_placement(free, 64 * GIB)
-            self.assertEqual(raised.exception.code, "gpu-busy")
-            self.assertEqual(raised.exception.free_vram, free)
-
-    def test_splits_free_vram_and_ram_each_less_the_reserve(self):
-        self.assertEqual(te.plan_placement(12 * GIB, 7 * GIB), {0: 12 * GIB - te.GPU_RESERVE, "cpu": 7 * GIB - te.CPU_RESERVE})
-        self.assertEqual(te.plan_placement(14 * GIB, 10 * GIB), {0: 14 * GIB - te.GPU_RESERVE, "cpu": 10 * GIB - te.CPU_RESERVE})
-
-    def test_the_gpu_reserve_exceeds_the_old_one_that_crashed_at_the_card_ceiling(self):
-        self.assertGreater(te.GPU_RESERVE, int(1.5 * GIB))
-
-    def test_exactly_two_gib_free_is_admitted(self):
-        self.assertEqual(te.plan_placement(2 * GIB, 10 * GIB)[0], 2 * GIB - te.GPU_RESERVE)
-
-    def test_ram_below_the_reserve_never_goes_negative(self):
-        self.assertEqual(te.plan_placement(12 * GIB, GIB)["cpu"], 0)
 
 
 class Identity(unittest.TestCase):
@@ -65,12 +43,26 @@ class Identity(unittest.TestCase):
         self.assertNotEqual(te.embedding_key("a", "x"), te.embedding_key("a", "y"))
         self.assertNotEqual(te.embedding_key("ab", "x"), te.embedding_key("a", "bx"))
 
-    def test_identity_names_every_input(self):
-        base = dict(revisions={"r/one": "111", "r/two": "222"}, dtype="bfloat16", transformers_version="5.1.0", peft_version="0.18.1", kimodo_commit="6bb5848")
-        identity = te.encoder_identity(**base)
-        for field, other in (("dtype", "float32"), ("transformers_version", "5.2.0"), ("peft_version", "0.19.0"), ("kimodo_commit", "abcdef0"),
-                             ("revisions", {"r/one": "111", "r/two": "333"})):
-            self.assertNotEqual(identity, te.encoder_identity(**{**base, field: other}), field)
+    def test_every_identity_field_changes_the_key(self):
+        # The repos' names alone exceed 40 characters, so a key built from a truncated identity cannot tell
+        # the later fields apart: each field here sits past that point.
+        base = dict(
+            assembly=te.ASSEMBLY, device="cpu", revisions={"r/one": "111", "r/two": "222", "r/three": "333"}, dtype="bfloat16",
+            torch_version="2.5.1+cpu", transformers_version="5.1.0", peft_version="0.18.1", accelerate_version="1.13.0",
+            kimodo_commit="6bb5848", loader_sha256="a" * 64,
+        )
+        key = te.embedding_key(te.encoder_identity(**base), "x")
+        changes = dict(
+            assembly="llm2vec-A", device="other-device", dtype="float32", torch_version="2.6.0+cpu", transformers_version="5.2.0",
+            peft_version="0.19.0", accelerate_version="1.14.0", kimodo_commit="abcdef0", loader_sha256="b" * 64,
+        )
+        for repo in base["revisions"]:
+            changes[f"revision:{repo}"] = {**base["revisions"], repo: "999"}
+        self.assertEqual(len(changes), 12)
+        for field, other in changes.items():
+            name = "revisions" if field.startswith("revision:") else field
+            changed = te.embedding_key(te.encoder_identity(**{**base, name: other}), "x")
+            self.assertNotEqual(key, changed, field)
 
     def test_snapshot_revision_is_read_from_the_mounted_cache(self):
         with tempfile.TemporaryDirectory() as home:
@@ -144,17 +136,6 @@ class CachedEncoder(unittest.TestCase):
             self.assertEqual(tuple(features.shape), (1, 1, 4096))
             self.assertEqual(encoder.store.get_all(te.TEXT_EMBEDDING)[0].dim, 4096)
 
-    def test_gpu_busy_propagates_without_a_cpu_path_and_stores_nothing(self):
-        def busy(texts):
-            raise te.GpuBusy(GIB)
-
-        with tempfile.TemporaryDirectory() as directory:
-            encoder = open_encoder(directory, busy)
-            with self.assertRaises(te.GpuBusy) as raised:
-                encoder([SECRET])
-            self.assertNotIn(SECRET, str(raised.exception))
-            self.assertEqual(encoder.count(), 0)
-
     def test_the_contract_methods_return_self_or_the_device(self):
         with tempfile.TemporaryDirectory() as directory:
             encoder = open_encoder(directory, FakeChild())
@@ -163,22 +144,38 @@ class CachedEncoder(unittest.TestCase):
             self.assertEqual(encoder.get_device(), "cpu")
 
 
+class ThreadCap(unittest.TestCase):
+    def test_accepts_one_to_sixteen(self):
+        for raw in ("1", "8", "16"):
+            self.assertEqual(te.thread_cap({"VILI_THREADS": raw}), int(raw))
+
+    def test_refuses_the_rest_without_echoing_the_value(self):
+        for raw in ("", "0", "17", "-1", "8.5", "eight", " 8", "\u0668"):
+            with self.assertRaises(ValueError) as raised:
+                te.thread_cap({"VILI_THREADS": raw})
+            self.assertNotIn(raw or "NUL", str(raised.exception))
+        with self.assertRaises(ValueError):
+            te.thread_cap({})
+
+    def test_apply_sets_torch_to_the_cap(self):
+        before = te.torch.get_num_threads()
+        try:
+            self.assertEqual(te.apply_thread_cap({"VILI_THREADS": "3"}), 3)
+            self.assertEqual(te.torch.get_num_threads(), 3)
+        finally:
+            te.torch.set_num_threads(before)
+
+    def test_the_child_applies_the_cap_before_it_loads_anything(self):
+        source = (Path(te.__file__).with_name("kimodo-text-encode.py")).read_text()
+        self.assertLess(source.index("apply_thread_cap(os.environ)"), source.index("load_encoder(preset"))
+
+
 class ChildBoundary(unittest.TestCase):
     def run_stub(self, body, texts=("aa",)):
         with tempfile.TemporaryDirectory() as directory:
             stub = Path(directory) / "child.py"
             stub.write_text(textwrap.dedent(body))
             return te.run_child(list(texts), Path(directory) / "out.mc", child_path=stub, timeout=60)
-
-    def test_exit_three_is_gpu_busy_with_the_measured_free_vram(self):
-        with self.assertRaises(te.GpuBusy) as raised:
-            self.run_stub("""
-                import sys, msgpack
-                out = sys.argv[sys.argv.index("--out") + 1]
-                open(out, "wb").write(msgpack.packb({"error": "gpu-busy", "freeVramBytes": 1234}, use_bin_type=True))
-                sys.exit(3)
-            """)
-        self.assertEqual(raised.exception.free_vram, 1234)
 
     def test_other_failures_name_the_exit_code_and_never_the_text(self):
         with self.assertRaises(RuntimeError) as raised:

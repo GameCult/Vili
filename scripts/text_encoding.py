@@ -22,31 +22,26 @@ import torch
 from cultcache_py import CultCache, SingleFileMessagePackBackingStore, define_database_entry_type, database_entry_field, leaves as t
 
 GIB = 1024 ** 3
-MIN_FREE_VRAM = 2 * GIB
-GPU_RESERVE = int(3 * GIB)  # headroom for activations and offloaded layers streamed through the card
-CPU_RESERVE = int(1.5 * GIB)
 EMBEDDING_DIM = 4096
 EMBEDDING_BYTES = EMBEDDING_DIM * 4
-CHILD_EXIT_GPU_BUSY = 3
 CHILD_PATH = Path(__file__).with_name("kimodo-text-encode.py")
-LLAMA_BASE = "meta-llama/Meta-Llama-3-8B-Instruct"  # the base model the mntp adapter repo points at
+LLAMA_BASE = "meta-llama/Meta-Llama-3-8B-Instruct"  # the base model both LLM2Vec adapters are applied to
+ASSEMBLY = "llm2vec-B-mntp-merged-then-supervised"
+MAX_THREADS = 16
 
 
-class GpuBusy(RuntimeError):
-    """The card has too little free VRAM to host the encoder; there is no CPU fallback."""
-
-    code = "gpu-busy"
-
-    def __init__(self, free_vram: int) -> None:
-        self.free_vram = free_vram
-        super().__init__(f"gpu-busy: {free_vram / GIB:.2f} GiB of VRAM free, {MIN_FREE_VRAM / GIB:.0f} GiB needed")
+def thread_cap(environ) -> int:
+    """VILI_THREADS, the one torch thread budget of the worker and its encoder child: an integer from 1 to MAX_THREADS."""
+    raw = environ.get("VILI_THREADS", "")
+    if not raw.isascii() or not raw.isdigit() or not 1 <= int(raw) <= MAX_THREADS:
+        raise ValueError(f"VILI_THREADS must be an integer from 1 to {MAX_THREADS}")
+    return int(raw)
 
 
-def plan_placement(free_vram: int, mem_available: int) -> dict:
-    """The accelerate max_memory for one child call: free VRAM and available RAM, each less its reserve."""
-    if free_vram < MIN_FREE_VRAM:
-        raise GpuBusy(free_vram)
-    return {0: free_vram - GPU_RESERVE, "cpu": max(mem_available - CPU_RESERVE, 0)}
+def apply_thread_cap(environ) -> int:
+    threads = thread_cap(environ)
+    torch.set_num_threads(threads)
+    return threads
 
 
 def read_snapshot_revision(hf_home: Path, repo_id: str) -> str:
@@ -55,10 +50,16 @@ def read_snapshot_revision(hf_home: Path, repo_id: str) -> str:
     return ref.read_text().strip()
 
 
-def encoder_identity(*, revisions: dict, dtype: str, transformers_version: str, peft_version: str, kimodo_commit: str) -> str:
-    """The canonical string a vector is keyed under: every input that can change it."""
+def encoder_identity(*, assembly: str, device: str, revisions: dict, dtype: str, torch_version: str, transformers_version: str,
+                     peft_version: str, accelerate_version: str, kimodo_commit: str, loader_sha256: str) -> str:
+    """The canonical string a vector is keyed under: every input that can change it, in a fixed field order.
+
+    Thread count is provenance, not identity; the encoder child's own bytes are, through loader_sha256."""
     parts = [f"{repo}@{revision}" for repo, revision in sorted(revisions.items())]
-    parts += [f"dtype={dtype}", f"transformers={transformers_version}", f"peft={peft_version}", f"kimodo={kimodo_commit}"]
+    parts += [
+        f"assembly={assembly}", f"device={device}", f"dtype={dtype}", f"torch={torch_version}", f"transformers={transformers_version}",
+        f"peft={peft_version}", f"accelerate={accelerate_version}", f"kimodo={kimodo_commit}", f"loader={loader_sha256}",
+    ]
     return ";".join(parts)
 
 
@@ -110,7 +111,7 @@ def open_store(path) -> CultCache:
 
 
 def run_child(texts: list, out_path, child_path=CHILD_PATH, timeout: float = 1800.0) -> dict:
-    """Run the one-shot encoder child for `texts` and return its answer file. Raises GpuBusy or RuntimeError."""
+    """Run the one-shot encoder child for `texts` and return its answer file. Raises RuntimeError on any non-zero exit."""
     process = subprocess.run(
         [sys.executable, str(child_path), "--out", str(out_path)],
         input=json.dumps({"texts": texts}).encode("utf-8"),
@@ -118,8 +119,6 @@ def run_child(texts: list, out_path, child_path=CHILD_PATH, timeout: float = 180
         timeout=timeout,
     )
     answer = msgpack.unpackb(Path(out_path).read_bytes(), raw=False) if Path(out_path).exists() else {}
-    if process.returncode == CHILD_EXIT_GPU_BUSY:
-        raise GpuBusy(int(answer.get("freeVramBytes", 0)))
     if process.returncode != 0:
         raise RuntimeError(f"text encoder child failed with exit code {process.returncode}")
     return answer
@@ -196,7 +195,7 @@ class CachedTextEncoder:
                 dim=EMBEDDING_DIM,
                 vector=vector,
                 vectorSha256=hashlib.sha256(vector).hexdigest(),
-                gpuBytes=int(placement.get("gpuBytes", 0)),
+                gpuBytes=0,
                 cpuBytes=int(placement.get("cpuBytes", 0)),
                 encodeSeconds=float(took),
                 createdAt=datetime.now(timezone.utc).isoformat(),
