@@ -49,7 +49,7 @@ if (clip.startsWith("hang")) {
   if (clip.startsWith("slow")) await new Promise((resolve) => setTimeout(resolve, 6000));
   if (clip.startsWith("orphan")) {
     const before = grandchildren();
-    spawnGrandchild();
+    spawnGrandchild().unref(); // a live child would keep this process, and so the export, alive
     for (let waited = 0; grandchildren() === before && waited < 3000; waited += 25) await new Promise((resolve) => setTimeout(resolve, 25));
   }
   writeFileSync(fbx, Buffer.concat([Buffer.from("FBX-STUB:"), readFileSync(bvh)]));
