@@ -1112,6 +1112,20 @@ test("the entry takes exactly --state-root <absolute> --kimodo-commit <40 hex>, 
   }
 });
 
+// A startup failure that kills the unit names its cause from what the failing code itself says (its error code, or
+// the fixed text of a plain Error), and never repeats a value: an fs error's own message carries the path.
+test("a failed startup names the cause and repeats no value", async () => {
+  const good = ["--state-root", "/var/lib/gamecult/vili", "--kimodo-commit", "6bb58488037dd65360ff0c5d1692b403a23309f7"];
+  const bind = { GAMECULT_IDUNN_CANDIDATE_BIND: "127.0.0.1:18861" };
+  const unset = await runEntry(good, bind);
+  assert.equal(unset.code, 1);
+  assert.match(unset.output, /GAMECULT_IDUNN_RUNTIME_BUNDLE is required/);
+  const missing = await runEntry(good, { ...bind, GAMECULT_IDUNN_RUNTIME_BUNDLE: "/canary-bundle-dir" });
+  assert.equal(missing.code, 1);
+  assert.match(missing.output, /ENOENT/);
+  assert.ok(!missing.output.includes("canary"), "the failure repeated a value");
+});
+
 test("the entry derives the daemon's host, port, interpreter and environment identity from the release", async () => {
   const { createHash } = await import("node:crypto");
   const { daemonEnvironment } = await import("./idunn-entry.mjs");
