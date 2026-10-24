@@ -4,15 +4,15 @@ Vili is the GameCult Persona animation daemon.
 
 It owns the bridge from Persona performance intent to body-motion generation. Its
 backend is Kimodo, run by Vili's own daemon as a CPU-only Python process tree on
-Linux. It is built to run on Yggdrasil as an Idunn target (planned, not live; see Front Door).
+Linux. It runs on Yggdrasil as an Idunn target (see Front Door).
 
 ## Front Door
 
-- **Value:** a supervised path from a text prompt to generated body motion. The daemon spawns one resident Kimodo worker, caps its threads, and returns motion artifacts (`motion.npz`, optional BVH) for a job.
+- **Value:** a supervised path from a text prompt to generated body motion. The daemon spawns one resident Kimodo worker, caps its threads, and returns motion artifacts (`motion.npz`, BVH, and FBX for Unity) for a job.
 - **Problem:** Personas and games need generated motion, but cold per-request model loads cost minutes. One daemon owns job identity, worker lifecycle, the thread budget and artifact references, so callers touch no model state.
 - **Entry points:** `scripts/vili-daemon.mjs` (the daemon; `npm start`, `npm test`), `scripts/idunn-entry.mjs` (the process Idunn runs), `deployment/idunn/recipe.toml` (the sealed release), `scripts/kimodo-resident-worker.py` (the worker it spawns), `scripts/kimodo-text-encode.py` (the one-shot encoder child), `POST /motion/generate` (see Motion Generation), `docs/verse-service-contract.md` and `docs/motion-pipeline-target.md`.
-- **Live:** the process tree below, run by hand for development and tests: `POST /motion/generate`, `GET /health`, `GET /operator-state`, and the CultCache service store. It produces `motion.npz` and optional BVH on the SOMA skeleton; there is no FBX export.
-- **Planned:** the Idunn target `vili` on Yggdrasil at `http://10.77.0.1:8824` over WireGuard, with its provisioning runbook in `gamecult-ops`; neither exists until the first `idunn up` lands. FBX export and a text-prompt-to-Unity-clip path with no hand steps (`docs/motion-pipeline-target.md`).
+- **Live:** the Idunn target `vili` on Yggdrasil at `http://10.77.0.1:8824` (WireGuard only), CPU only: `POST /motion/generate` (add `"fbx": true` for a Unity-ready FBX per clip), `POST /motion/rest-fbx` (the avatar's rest pose), `GET /motion/artifacts/{jobId}/{name}` (the FBX and BVH bytes), `GET /health`, `GET /operator-state`, and the CultCache service store. FBX export is `scripts/bvh-to-fbx.py` in the release's own Blender 5.2.2; see FBX Export.
+- **Planned:** worker intake closed to local callers only, publication to Odin, and a Thing 2 operator surface. The text-prompt-to-Unity-clip path with no hand steps is `docs/motion-pipeline-target.md`.
 
 ## Authority
 
@@ -128,18 +128,50 @@ Supported request fields:
 - `numTransitionFrames` / `num_transition_frames`
 - `constraints` as an object/list, or `constraints`, `constraintsPath`, or
   `constraints_path` as a path on the worker host
-- `seed`
+- `seed` (absent: the daemon mints one, and every job records the seed it used)
 - `cfg`, `cfgType` / `cfg_type`, `cfgWeight` / `cfg_weight`
 - `bvh`, `bvhStandardTpose` / `bvh_standard_tpose`
+- `fbx` and `clipName` (see FBX Export)
 - `noPostprocess` / `no_postprocess`
 - `saveExampleDir` / `save_example_dir`
-- `timeoutMs`, `workerTimeoutMs`
+- `timeoutMs`, `workerTimeoutMs`, `exportTimeoutMs` (at most 120000)
 
 Vili intentionally does not accept an arbitrary Kimodo output path. Generated
 artifacts are written under `.vili/artifacts/{jobId}/` and referenced from the
 job record. `Kimodo-SOMA-RP-v1.1` produces NPZ and optional BVH output,
 `Kimodo-SMPLX-RP-v1.1` also exports AMASS NPZ, and `Kimodo-G1-RP-v1.1` also
 exports CSV when that model is resident.
+
+## FBX Export
+
+`"fbx": true` makes the job's BVH an FBX for Unity, beside it: `motion.fbx`, or `motion/motion_NN.fbx` for several
+samples. It implies `bvh` and `bvhStandardTpose`; an explicit `bvhStandardTpose: false` is a 400. `clipName`
+(`^[A-Za-z0-9_-]{1,64}$`, default the job id; sample N of several is `<clipName>_NN`) names the armature, the action
+and the FBX take. With Blender not ready (`backend.blender` is `unconfigured` or `unavailable`, not a
+`Blender 5.2.2 LTS ...` line) an `fbx` request is a 503 `blender-unavailable` and nothing is written.
+
+The worker never runs Blender. After it answers, the daemon runs the release's Blender
+(`blender -b --factory-startup --python-use-system-env --python scripts/bvh-to-fbx.py`) on each BVH it listed, and
+only on a regular file inside the job's artifact directory; the FBX path is the BVH's, so it is derived from the
+job id. Blender converts and nothing else: the SOMA77 joint names are Kimodo's, the pose is the standard T-pose in
+metres, and the clip's travel stays on `Hips` (Root is static), so Unity derives root motion or bakes it into the
+pose as the caller chooses. Blender runs under the write gate in its own process group at nice 10, with
+`HOME=/nonexistent`, `PYTHONHASHSEED=0` and `LD_LIBRARY_PATH=<blender>/lib` as its whole environment, a 120 s
+timeout, and its output in `<state>/logs/export.log`. It is killed with the worker on lease loss and stopped on
+SIGTERM. A failed export fails the job (`fbx-export-refused` or `fbx-export-failed (...)`, 502) and the answer never
+carries Blender's output.
+
+One BVH gives the same FBX bytes on one host body (a fixed hash seed and a fixed time stamp); FBX bytes differ
+between glibc versions in the last float digits, so the BVH is the cross-body reproducibility unit.
+
+`POST /motion/rest-fbx` exports Kimodo's own standard-T-pose rest skeleton as `SOMA77_Rest.fbx` in a `rest-<ms>` job,
+the source for the avatar. `GET /motion/artifacts/{jobId}/{name}` serves `motion.fbx`, `motion.bvh`,
+`SOMA77_Rest.fbx` and `motion/motion_NN.fbx|bvh` of a job as bytes, read-only; anything else is a 404.
+
+A job is a `gamecult.vili.motion_job.v1` record in `<state>/jobs/{jobId}.json` and the generate answer: the request,
+the `seed` used, `files` (`name`, `bytes`, `sha256` for every file in the artifact directory), the worker's answer,
+and for an export `export` (`blender` version line, `script` sha256, `settings`, and per clip `file`, `clipName`,
+`bones`, `frames`, `fps`).
 
 ## Current Runtime State
 
