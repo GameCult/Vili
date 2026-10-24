@@ -3,7 +3,7 @@ import http from "node:http";
 import os from "node:os";
 import { createHash, randomBytes, randomInt } from "node:crypto";
 import { closeSync, constants, lstatSync, openSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
-import { copyFile, mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, open, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline";
 import net from "node:net";
@@ -495,6 +495,11 @@ function regularFileInside(file, directory) {
 }
 
 const exportScript = path.join(__dirname, "bvh-to-fbx.py");
+// The state slot "work" (deployment/idunn/recipe.toml): one private directory per export, removed by the export itself
+// and, if the daemon died mid-export, swept by the next daemon that holds the state root (sweepWork).
+const WORK_DIR = "work";
+const EXPORT_PREFIX = "export-";
+const EXPORT_NAME = new RegExp(`^${EXPORT_PREFIX}[A-Za-z0-9]{6}$`);
 const EXPORT_SETTINGS = "standard-tpose soma77 metres hashseed0 time1970";
 const EXPORT_TIMEOUT_MS = 120000;
 let exportScriptDigest = null;
@@ -565,11 +570,12 @@ async function probeBlender() {
 }
 
 // The bytes of a regular file strictly inside `directory`, or null. The file is opened without following a symlink
-// and the open file is the one checked, so a path swapped after the check cannot redirect the read.
+// and without blocking (a FIFO or a device would otherwise hold the open, and a filesystem thread, indefinitely), and
+// the open file is the one checked, so a path swapped after the check cannot redirect the read.
 async function readInside(file, directory) {
   let handle = null;
   try {
-    handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const opened = await handle.stat();
     if (!opened.isFile() || !regularFileInside(file, directory)) return null;
     const named = lstatSync(file);
@@ -591,9 +597,7 @@ async function exportClip(bvh, fbx, clipName, timeoutMs, artifactDir) {
   const input = await readInside(bvh, artifactDir);
   if (input === null) return { error: "fbx-export-refused" };
   guard();
-  await mkdir(path.join(args.stateRoot, "work"), { recursive: true });
-  guard();
-  const work = await mkdtemp(path.join(args.stateRoot, "work", "export-"));
+  const work = await mkdtemp(path.join(args.stateRoot, WORK_DIR, EXPORT_PREFIX));
   try {
     const privateBvh = path.join(work, "in.bvh");
     const privateFbx = path.join(work, "out.fbx");
@@ -628,6 +632,17 @@ async function exportClip(bvh, fbx, clipName, timeoutMs, artifactDir) {
     return { error: `fbx-export-failed (${how})` };
   } finally {
     if (mayWrite()) await rm(work, { recursive: true, force: true });
+  }
+}
+
+// The export directories a killed daemon left: only directories named as mkdtemp names them, only under work/. Called
+// once, after the runtime holds the state root, so a live daemon's export is never swept.
+async function sweepWork() {
+  const root = path.join(args.stateRoot, WORK_DIR);
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !EXPORT_NAME.test(entry.name)) continue;
+    guard();
+    await rm(path.join(root, entry.name), { recursive: true, force: true });
   }
 }
 
@@ -1184,6 +1199,8 @@ export async function serve(rt) {
   try {
     guard();
     await mkdir(path.join(args.stateRoot, "jobs"), { recursive: true });
+    await mkdir(path.join(args.stateRoot, WORK_DIR), { recursive: true });
+    await sweepWork();
     await persistSurfaces();
     await probeBlender();
   } catch (error) {

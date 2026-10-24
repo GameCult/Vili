@@ -370,6 +370,15 @@ recovery = "preserve"
 startup = "create-or-open-after-write-lease"
 
 [[state.slots]]
+id = "work"
+relative_path = "work"
+kind = "external-directory"
+schema = "gamecult.vili.export_scratch.v0"
+writer = "process-bound-single-writer"
+recovery = "rebuildable"
+startup = "create-or-open-after-write-lease"
+
+[[state.slots]]
 id = "logs"
 relative_path = "logs"
 kind = "external-directory"
