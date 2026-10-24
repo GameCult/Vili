@@ -1500,7 +1500,9 @@ test("losing the lease kills a running export within a second and records nothin
     await until(() => daemon.starts().length === 1, "the version probe, run once the lease was held");
     assert.equal(existsSync(path.join(daemon.stateRoot, "logs")), false, "the probe writes nothing to the state root");
     const pending = generate(daemon, exportRequest({ clipName: "slow" }));
-    const run = await until(() => exportStarts(daemon)[0], "the export to start");
+    const ended = pending.then((answer) => { throw new Error(`the job ended before its export started: ${answer.status} ${answer.raw.slice(0, 300)}`); });
+    ended.catch(() => {});
+    const run = await Promise.race([until(() => exportStarts(daemon)[0], "the export to start"), ended]);
     rmSync(daemon.lease);
     const lost = Date.now();
     await until(() => !isAlive(run.pid), "the export to be dead", 2);
@@ -1529,6 +1531,9 @@ test("the seed is minted when absent and recorded for every job", async () => {
     assert.equal(given.worker.seed, 7);
     assert.equal(given.worker.metaSeed, 7);
     assert.equal(JSON.parse(readFileSync(path.join(given.artifactDir, "meta.json"), "utf8")).seed, 7);
+    const minted = new Set();
+    for (let count = 0; count < 3; count += 1) minted.add((await generate(daemon, exportRequest())).body.seed);
+    assert.ok(minted.size > 1, "minted seeds differ from job to job");
     const zero = (await generate(daemon, exportRequest({ seed: 0 }))).body;
     assert.equal(zero.seed, 0, "0 is a seed");
   } finally {
