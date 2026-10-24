@@ -9,16 +9,22 @@ import { serve } from "../vili-daemon.mjs";
 const leasePath = process.env.FAKE_IDUNN_LEASE;
 const healthLog = process.env.FAKE_IDUNN_HEALTH_LOG;
 const answer = process.env.FAKE_IDUNN_ANSWER_THROWS !== "1";
-// An artifacts directory: the lease is gone from the moment a job there has written its meta.json, so a test can
-// lose it between a job's first write and the spawn of its worker.
-const loseAfterMeta = process.env.FAKE_IDUNN_LOSE_AFTER_META;
+// The lease is gone from the moment a path exists under the state root (one "*" segment matches any entry), so a
+// test can lose it between two writes of one request.
+const stateRoot = process.env.FAKE_IDUNN_STATE_ROOT;
+const loseWhenExists = process.env.FAKE_IDUNN_LOSE_WHEN_EXISTS;
+
+function exists(parts, base) {
+  if (!parts.length) return true;
+  const [head, ...rest] = parts;
+  if (head !== "*") return existsSync(path.join(base, head)) && exists(rest, path.join(base, head));
+  return existsSync(base) && readdirSync(base).some((entry) => exists(rest, path.join(base, entry)));
+}
 
 const signer = {
   assertWriteLease() {
     if (!existsSync(leasePath)) throw new Error("no lease");
-    if (loseAfterMeta && existsSync(loseAfterMeta) && readdirSync(loseAfterMeta).some((job) => existsSync(path.join(loseAfterMeta, job, "meta.json")))) {
-      throw new Error("lease lost");
-    }
+    if (loseWhenExists && exists(loseWhenExists.split("/"), stateRoot)) throw new Error("lease lost");
     return "lease";
   },
   answerRouteObservation(request) {

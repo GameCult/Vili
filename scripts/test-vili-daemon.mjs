@@ -766,7 +766,7 @@ for (let trial = 1; trial <= 40; trial += 1) {
   });
 }
 
-const idunnDaemon = async ({ leased = false, extraEnv = {}, loseAfterMeta = false } = {}) => {
+const idunnDaemon = async ({ leased = false, extraEnv = {}, loseWhenExists = null } = {}) => {
   const root = mkdtempSync(path.join(os.tmpdir(), "vili-test-"));
   const lease = path.join(root, "lease");
   const healthLog = path.join(root, "health.log");
@@ -774,7 +774,7 @@ const idunnDaemon = async ({ leased = false, extraEnv = {}, loseAfterMeta = fals
   const daemon = await startDaemon({
     root, nested: true, entry: fakeIdunnEntry, extraEnv: {
       FAKE_IDUNN_LEASE: lease, FAKE_IDUNN_HEALTH_LOG: healthLog, ...extraEnv,
-      ...(loseAfterMeta ? { FAKE_IDUNN_LOSE_AFTER_META: path.join(root, "a", "b", "state", "artifacts") } : {}),
+      ...(loseWhenExists ? { FAKE_IDUNN_STATE_ROOT: path.join(root, "a", "b", "state"), FAKE_IDUNN_LOSE_WHEN_EXISTS: loseWhenExists } : {}),
     },
   });
   return Object.assign(daemon, { lease, health: () => (existsSync(healthLog) ? readFileSync(healthLog, "utf8").split("\n").filter(Boolean) : []) });
@@ -866,19 +866,51 @@ for (const noticed of [false, true]) {
   });
 }
 
-// The lease goes after the job wrote its meta.json and before its worker would start: the spawn is gated at the
-// spawn, not by the request's earlier checks.
-test("a worker is not started, and its directories are not made, once the lease is gone", async () => {
-  const daemon = await idunnDaemon({ leased: true, loseAfterMeta: true });
+// The lease goes between two writes of one request. Each case names the path whose appearance takes the lease, and
+// what must not exist afterwards: every write and the spawn are gated where they happen, not by the request's
+// earlier checks.
+const losses = [
+  { when: "artifacts/*", absent: ["artifacts/*/meta.json", "logs", "embeddings"] },
+  { when: "artifacts/*/meta.json", absent: ["logs", "embeddings"] },
+  { when: "logs", absent: ["embeddings"] },
+  { when: "embeddings", absent: ["logs/worker.log"] },
+  { when: "embeddings/stub-spawns.log", absent: ["artifacts/*/request.json", "jobs/*"] },
+];
+for (const { when, absent } of losses) {
+  test(`a request is stopped at its next write when the lease goes at ${when}`, async () => {
+    const daemon = await idunnDaemon({ leased: true, loseWhenExists: when });
+    try {
+      await until(() => existsSync(path.join(daemon.stateRoot, "vili.service.cc")), "the service store", 10);
+      const answer = await generate(daemon);
+      assert.equal(answer.status, 503);
+      assert.equal(answer.body.code, "write-lease-lost");
+      for (const gone of absent) {
+        const parts = gone.split("/");
+        const found = (base, rest) => (rest.length === 0 ? existsSync(base)
+          : rest[0] === "*" ? existsSync(base) && readdirSync(base).some((entry) => found(path.join(base, entry), rest.slice(1)))
+            : found(path.join(base, rest[0]), rest.slice(1)));
+        assert.equal(found(daemon.stateRoot, parts), false, `${gone} must not exist`);
+      }
+      if (when === "embeddings") assert.deepEqual(daemon.spawns(), []);
+    } finally {
+      await daemon.stop();
+    }
+  });
+}
+
+// The lease goes while the first persist is under way: the daemon survives it, stays degraded, and the rest of the
+// startup writes are not made.
+test("a lease lost while the state root is opened leaves the daemon up, degraded and writing nothing more", async () => {
+  const daemon = await idunnDaemon({ leased: true, loseWhenExists: "vili.service.cc" });
   try {
-    await until(() => existsSync(path.join(daemon.stateRoot, "vili.service.cc")), "the service store", 10);
+    await until(() => daemon.health().includes("degraded") || daemon.proc.exitCode !== null, "the loss to be seen", 15);
+    assert.equal(daemon.proc.exitCode, null, "the daemon must not die of it");
+    assert.deepEqual(daemon.health(), ["degraded"]);
+    const store = readFileSync(path.join(daemon.stateRoot, "vili.service.cc"));
+    assert.ok(store.includes("operator_state") && !store.includes("command_boundary"), "the second document is not written");
     const answer = await generate(daemon);
     assert.equal(answer.status, 503);
     assert.equal(answer.body.code, "write-lease-lost");
-    assert.deepEqual(daemon.spawns(), []);
-    assert.equal(existsSync(path.join(daemon.stateRoot, "logs")), false);
-    assert.equal(existsSync(path.join(daemon.stateRoot, "embeddings")), false);
-    assert.deepEqual(readdirSync(path.join(daemon.stateRoot, "jobs")), []);
   } finally {
     await daemon.stop();
   }
