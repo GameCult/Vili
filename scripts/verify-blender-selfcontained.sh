@@ -85,7 +85,7 @@ try:
     runpy.run_path("scripts/bvh-to-fbx.py", run_name="__main__")
 finally:
     seen = sorted({l.split(None, 5)[5].strip() for l in open("/proc/self/maps") if len(l.split(None, 5)) == 6 and l.split(None, 5)[5].startswith("/")})
-    open(sys.argv[sys.argv.index("--") + 1] + ".maps", "w").write("\n".join(seen) + "\n")
+    open(sys.argv[sys.argv.index("--") + 2] + ".maps", "w").write("\n".join(seen) + "\n")
 PY
 daemon_env "$blender" -b --factory-startup --python-use-system-env --python-exit-code 1 --python mapped.py -- \
   "$PWD/t.bvh" "$PWD/mapped.fbx" proof >/dev/null
