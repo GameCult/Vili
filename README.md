@@ -155,7 +155,7 @@ and the FBX take. With Blender not ready (`backend.blender` is `unconfigured` or
 The worker never runs Blender. After it answers, the daemon runs the release's Blender
 (`blender -b --factory-startup --python-use-system-env --python scripts/bvh-to-fbx.py`) on each BVH it listed.
 The BVH must be a regular file inside the job's artifact directory, opened without following a symlink; Blender is
-handed a private copy of it and writes a private FBX in a directory made for that export (`<state>/work/`), and the
+handed a private copy of it and writes a private FBX in a directory made for that export (`<state>/work/export-XXXXXX`, the `work` state slot; a daemon that holds the state root sweeps the ones a killed daemon left at start), and the
 daemon creates the FBX beside the BVH exclusively, so a path planted in the job directory is never read, written
 through or replaced. The FBX path is the BVH's, derived from the job id, which is the clock plus random bits and is
 taken by an exclusive mkdir. Blender converts and nothing else: the SOMA77 joint names are Kimodo's, the pose is the standard T-pose in
@@ -169,7 +169,7 @@ carries Blender's output.
 One BVH gives the same FBX bytes on one host body (a fixed hash seed and a fixed time stamp); FBX bytes differ
 between glibc versions in the last float digits, so the BVH is the cross-body reproducibility unit.
 
-`POST /motion/rest-fbx` exports Kimodo's own standard-T-pose rest skeleton as `SOMA77_Rest.fbx` in a `rest-<ms>` job,
+`POST /motion/rest-fbx` exports Kimodo's own standard-T-pose rest skeleton as `SOMA77_Rest.fbx` in a `rest-<13-digit ms>-<8 hex>` job,
 the source for the avatar. `GET /motion/artifacts/{jobId}/{name}` serves `motion.fbx`, `motion.bvh`,
 `SOMA77_Rest.fbx` and `motion/motion_NN.fbx|bvh` of a job as bytes, read-only; anything else is a 404.
 
