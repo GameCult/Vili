@@ -1141,6 +1141,7 @@ test("the entry derives the daemon's host, port, interpreter and environment ide
       const derived = daemonEnvironment(bind, entryDir);
       assert.equal(derived.VILI_DAEMON_HOST, "127.0.0.1");
       assert.equal(derived.VILI_DAEMON_PORT, "18861");
+      assert.equal(derived.GAMECULT_IDUNN_CANDIDATE_BIND, "http://127.0.0.1:18861", "cultnet-ts compares the bind to the Expected route's endpoint, which carries the scheme Idunn's bare host:port lacks");
       assert.equal(derived.VILI_PYTHON, path.join(release, "python", "bin", "python3.12"));
       assert.equal(derived.VILI_PYTHON_ENV, `locks-sha256:${createHash("sha256").update("build lock bytes\nruntime lock bytes\n").digest("hex")}`);
     }
