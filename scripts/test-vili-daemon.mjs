@@ -1515,6 +1515,8 @@ test("what a stopping export still prints is not logged, and it is killed when i
     const pending = generate(daemon, exportRequest({ clipName: "hang", exportTimeoutMs: 60000 }));
     pending.catch(() => {});
     const run = await until(() => exportStarts(daemon)[0], "the export to start");
+    const logFile = path.join(daemon.stateRoot, "logs", "export.log");
+    await until(() => existsSync(logFile) && readFileSync(logFile, "utf8").includes("stub-blender-stderr hang"), "the export's first line to be logged");
     daemon.proc.kill("SIGTERM");
     await until(() => daemon.proc.exitCode !== null, "the daemon to exit", 30);
     assert.equal(daemon.proc.exitCode, 0);
