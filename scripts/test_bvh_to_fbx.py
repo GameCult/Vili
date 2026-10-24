@@ -35,6 +35,8 @@ if action is not None:
     def world(name, frame):
         scene.frame_set(frame)
         return (arm.matrix_world @ arm.pose.bones[name].matrix).translation.copy()
+    out["frame_range"] = [first, last]
+    out["hips_by_frame"] = {f: round((world("Hips", f) - world("Hips", first)).length, 4) for f in (first, first + 1, last - 1, last, last + 1)}
     out["hips_travel"] = (world("Hips", last) - world("Hips", first)).length
     out["root_wander"] = max((world("Root", f) - world("Root", first)).length for f in range(first, last + 1))
 print("INSPECT " + json.dumps(out))
@@ -133,7 +135,7 @@ class BvhToFbx(unittest.TestCase):
         run = convert(bvh, fbx, "walk")
         self.assertEqual(run.returncode, 0, run.stderr[-2000:])
         seen = self.inspect(fbx)
-        self.assertAlmostEqual(seen["hips_travel"], 1.0, delta=0.001)
+        self.assertAlmostEqual(seen["hips_travel"], 1.0, delta=0.001, msg=json.dumps(seen))
         self.assertLess(seen["root_wander"], 1e-4)
 
 
