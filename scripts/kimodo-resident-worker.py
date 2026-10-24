@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import shutil
+import sys
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -63,7 +64,7 @@ model, resolved_model = load_model(
     text_encoder=text_encoder,
 )
 model_revision = text_encoding.read_snapshot_revision(HF_HOME, MODEL_NAMES[resolved_model])
-worker_identity = {"kimodoCommit": kimodo_commit, "pythonEnv": python_env, "modelRevision": model_revision, "threads": threads}
+worker_identity = {"kimodoCommit": kimodo_commit, "pythonEnv": python_env, "modelRevision": model_revision, "threads": threads, "python": sys.version}
 model_load_seconds = time.time() - model_load_started_at
 model_info = get_model_info(resolved_model)
 display_model = model_info.display_name if model_info else resolved_model

@@ -1,12 +1,12 @@
 // Stands in for kimodo-resident-worker.py in the daemon's tests. It binds port 0, prints the ready line the
 // daemon waits for, and answers /health and /generate with what the daemon gave it. The --model value picks a
 // misbehaviour: crash-before-ready, hang-before-ready, sick, slow-health, stubborn, fail-generate,
-// refuse-generate, drop-generate, slow-generate, encoder (a grandchild, then no answer), graceful (exits 0.5 s after SIGTERM), die-after-ready. Any other value is just the model the worker serves.
+// refuse-generate, drop-generate, slow-generate, writer (appends to <output>.writes every 50 ms, never answers, ignores SIGTERM), slow-to-stop (no answer; prints a line and exits 1.5 s after SIGTERM), chatty (prints a line the moment it is healthy), encoder (a grandchild, then no answer), graceful (exits 0.5 s after SIGTERM), die-after-ready. Any other value is just the model the worker serves.
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 
 const argv = process.argv.slice(2);
 const flag = (name) => {
@@ -29,9 +29,15 @@ if (model === "crash-before-ready") process.exit(3);
 
 if (model === "stubborn") {
   process.on("SIGTERM", () => {});
-  const grandchild = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
-  appendFileSync(spawnLog, `grandchild ${grandchild.pid}\n`);
+  // the grandchild reports itself once its handler is armed, so a test never reads a pid that would die of the default SIGTERM
+  spawn(process.execPath, ["-e", `process.on('SIGTERM', () => {}); require('fs').appendFileSync(${JSON.stringify(spawnLog)}, 'grandchild ' + process.pid + '\\n'); setInterval(() => {}, 1000)`], { stdio: "ignore" });
 }
+
+if (model === "slow-to-stop") process.on("SIGTERM", () => {
+  console.log("stopping-line"); // output while it stops
+  setTimeout(() => process.exit(0), 1500);
+});
+if (model === "writer") process.on("SIGTERM", () => {}); // a worker that carries on writing through SIGTERM
 
 if (model === "graceful") {
   process.on("SIGTERM", () => {
@@ -56,6 +62,8 @@ if (model === "hang-before-ready") {
       if (request.method === "GET" && request.url === "/health") {
         healthCalls += 1;
         if (model === "sick" || model === "die-after-ready" || (model === "slow-health" && healthCalls <= 2)) return send(200, { ok: false });
+        writeFileSync(path.join(process.env.VILI_EMBEDDINGS_DIR, "stub-healthy"), ""); // a test can act the moment the worker is healthy
+        if (model === "chatty") console.log("after-healthy-line"); // after stub-healthy exists, which a test can make the loss of the lease
         send(200, { ok: true, model: model || "stub-model", displayModel: model || "Stub Model", pid: process.pid, requests });
       } else if (request.method === "POST" && request.url === "/generate") {
         requests += 1;
@@ -63,11 +71,14 @@ if (model === "hang-before-ready") {
         if (model === "fail-generate") return send(500, { ok: false });
         if (model === "refuse-generate") return send(200, { ok: false });
         if (model === "drop-generate") return request.socket.destroy();
-        if (model === "slow-generate") return;
+        if (model === "slow-generate" || model === "slow-to-stop") return;
+        if (model === "writer") {
+          setInterval(() => appendFileSync(`${payload.output}.writes`, `${Date.now()}\n`), 50);
+          return;
+        }
         if (model === "encoder") {
           // an encoder child of the real worker: a grandchild in the worker's group, then a request that never answers
-          const encoder = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore" });
-          appendFileSync(spawnLog, `grandchild ${encoder.pid}\n`);
+          spawn(process.execPath, ["-e", `process.on('SIGTERM', () => {}); require('fs').appendFileSync(${JSON.stringify(spawnLog)}, 'grandchild ' + process.pid + '\\n'); setInterval(() => {}, 1000)`], { stdio: "ignore" });
           return;
         }
         send(200, {

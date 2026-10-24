@@ -40,6 +40,20 @@ def load_encoder(hf_home, mntp_id, supervised_id, dtype):
     return LLM2Vec(model=model, tokenizer=tokenizer)
 
 
+def encode_texts(model, texts):
+    """Each text wrapped in the chat header and encoded alone: (vector bytes, seconds) lists."""
+    vectors, encode_seconds = [], []
+    for text in texts:
+        began = time.perf_counter()
+        features = model.tokenize([chat_header(text)])
+        with torch.no_grad():
+            vector = model.forward(features).detach().cpu().to(torch.float32)[0]
+        assert vector.shape == (EMBEDDING_DIM,)
+        vectors.append(vector.numpy().tobytes())
+        encode_seconds.append(time.perf_counter() - began)
+    return vectors, encode_seconds
+
+
 def main() -> int:
     apply_thread_cap(os.environ)
     texts = json.load(sys.stdin)["texts"]
@@ -53,15 +67,7 @@ def main() -> int:
         p.requires_grad = False
     load_seconds = time.perf_counter() - started
 
-    vectors, encode_seconds = [], []
-    for text in texts:
-        began = time.perf_counter()
-        features = model.tokenize([chat_header(text)])
-        with torch.no_grad():
-            vector = model.forward(features).detach().cpu().to(torch.float32)[0]
-        assert vector.shape == (EMBEDDING_DIM,)
-        vectors.append(vector.numpy().tobytes())
-        encode_seconds.append(time.perf_counter() - began)
+    vectors, encode_seconds = encode_texts(model, texts)
 
     out.write_bytes(msgpack.packb({
         "vectors": vectors,
@@ -75,4 +81,5 @@ def main() -> int:
     return 0
 
 
-sys.exit(main())
+if __name__ == "__main__":
+    sys.exit(main())
