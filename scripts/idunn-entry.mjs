@@ -134,7 +134,10 @@ async function main() {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((error) => {
-    console.error(`vili idunn entry failed: ${error?.name || "Error"}`);
+    // The cause, from the failing code: its error code, or the fixed text of a plain Error. An fs error's message
+    // carries the path, so a coded error is named by its code alone.
+    const cause = error?.code ?? String(error?.message ?? "").slice(0, 200);
+    console.error(`vili idunn entry failed: ${error?.name || "Error"} ${cause}`);
     process.exit(1);
   });
 }
