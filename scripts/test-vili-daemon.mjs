@@ -1902,7 +1902,8 @@ test("a listed BVH that is a FIFO is refused promptly and other file work procee
     for (const answer of answers) {
       assert.equal(answer.status, 502);
       assert.equal(answer.body.ok, false);
-      assert.ok(!answer.raw.includes("canary-fifo-clip"), "the refusal does not echo the clip name");
+      const { request: recorded, ...outcome } = answer.body; // the record keeps the request; the refusal itself must not echo it
+      assert.ok(recorded && !JSON.stringify(outcome).includes("canary-fifo-clip"), "the refusal does not echo the clip name");
     }
     assert.equal(exportStarts(daemon).length, 0, "no Blender for a node that is not a regular file");
     const other = await within(generate(daemon, exportRequest({ clipName: "after" })), 8000, "an ordinary job");
