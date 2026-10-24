@@ -1906,7 +1906,7 @@ test("a listed BVH that is a FIFO is refused promptly and other file work procee
       assert.ok(recorded && !JSON.stringify(outcome).includes("canary-fifo-clip"), "the refusal does not echo the clip name");
     }
     assert.equal(exportStarts(daemon).length, 0, "no Blender for a node that is not a regular file");
-    const other = await within(generate(daemon, exportRequest({ clipName: "after" })), 8000, "an ordinary job");
+    const other = await within(generate(daemon, exportRequest({ model: "stub-model", clipName: "after" })), 8000, "an ordinary job");
     assert.equal(other.status, 200);
     assert.ok(!daemon.stdout().includes("canary-fifo-clip") && !daemon.stderr().includes("canary-fifo-clip"));
   } finally {
