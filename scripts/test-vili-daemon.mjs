@@ -1472,12 +1472,13 @@ test("a failing or hung Blender fails the job, leaks nothing, and leaves nothing
     await until(() => !isAlive(left), "what Blender left running to be killed with its group");
 
     const before = daemon.starts().length;
+    known.add(left);
     const hung = await generate(daemon, exportRequest({ clipName: "hang", exportTimeoutMs: 2500 }));
     assert.equal(hung.status, 502);
     assert.equal(hung.body.error, "fbx-export-failed (signal SIGKILL)");
     const [run] = daemon.starts().slice(before);
-    await until(() => daemon.blenderGrandchildren().length === 1, "the hung Blender's grandchild");
-    await until(() => !isAlive(run.pid) && !isAlive(daemon.blenderGrandchildren()[0]), "the hung export's group to be dead");
+    const stuck = await until(() => daemon.blenderGrandchildren().filter((pid) => !known.has(pid))[0], "the hung Blender's grandchild");
+    await until(() => !isAlive(run.pid) && !isAlive(stuck), "the hung export's group to be dead");
     assert.equal(hung.body.files.some((file) => file.name.endsWith(".fbx")), false);
   } finally {
     await daemon.stop();
