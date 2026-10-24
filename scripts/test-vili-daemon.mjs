@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
@@ -1781,7 +1781,7 @@ test("a seed that is not an integer from 0 to 2^31 is refused before anything is
 });
 
 test("a BVH or FBX path swapped for a symlink after the job was checked is never followed", async () => {
-  for (const swap of ["bvh", "fbx", "both"]) {
+  for (const swap of ["bvh", "fbx", "both", "directory"]) {
     const daemon = await startDaemon();
     try {
       const outside = path.join(daemon.root, "outside-secret");
@@ -1793,17 +1793,25 @@ test("a BVH or FBX path swapped for a symlink after the job was checked is never
       await until(() => exportStarts(daemon).length === 1, "the first export to start");
       const [job] = readdirSync(path.join(daemon.stateRoot, "artifacts"));
       const motion = path.join(daemon.stateRoot, "artifacts", job, "motion");
-      if (swap !== "fbx") {
+      const elsewhere = path.join(daemon.root, "elsewhere");
+      if (swap === "directory") {
+        // the directory itself is replaced by a link to one that holds a regular file of the right name
+        mkdirSync(elsewhere);
+        writeFileSync(path.join(elsewhere, "motion_01.bvh"), "SECRET");
+        renameSync(motion, `${motion}-moved`);
+        symlinkSync(elsewhere, motion);
+      }
+      if (swap === "bvh" || swap === "both") {
         rmSync(path.join(motion, "motion_01.bvh"));
         symlinkSync(outside, path.join(motion, "motion_01.bvh"));
       }
-      if (swap !== "bvh") symlinkSync(victim, path.join(motion, "motion_01.fbx"));
+      if (swap === "fbx" || swap === "both") symlinkSync(victim, path.join(motion, "motion_01.fbx"));
       const answer = await pending;
       assert.equal(answer.status, 502, swap);
       assert.equal(answer.body.ok, false);
       assert.equal(readFileSync(victim, "utf8"), "VICTIM", `${swap}: nothing was written through the planted link`);
       assert.equal(readFileSync(outside, "utf8"), "SECRET");
-      for (const name of readdirSync(motion)) {
+      for (const name of readdirSync(swap === "directory" ? elsewhere : motion)) {
         if (name.endsWith(".fbx") && !lstatSync(path.join(motion, name)).isSymbolicLink()) {
           assert.ok(!readFileSync(path.join(motion, name), "utf8").includes("SECRET"), `${swap}: ${name} holds bytes read through the planted link`);
         }
