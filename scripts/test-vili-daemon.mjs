@@ -1360,10 +1360,16 @@ test("an fbx job exports every listed BVH", async () => {
 
     const [probe, run] = daemon.starts();
     assert.deepEqual(probe.argv, ["-b", "--factory-startup", "--version"]);
-    assert.deepEqual(run.argv, [
-      "-b", "--factory-startup", "--python-use-system-env", "--python-exit-code", "1", "--python", exportScriptPath,
-      "--", path.join(job.artifactDir, "motion.bvh"), path.join(job.artifactDir, "motion.fbx"), "wave_01",
+    assert.deepEqual(run.argv.slice(0, 8), [
+      "-b", "--factory-startup", "--python-use-system-env", "--python-exit-code", "1", "--python", exportScriptPath, "--",
     ]);
+    // Blender reads a private copy and writes a private FBX, in a directory made for this export alone: it is never
+    // handed a path in the job's directory, and the directory is gone once the export is over.
+    const [privateBvh, privateFbx, claimed] = run.argv.slice(8);
+    assert.match(path.relative(daemon.stateRoot, privateBvh), /^work\/export-[A-Za-z0-9]{6}\/in\.bvh$/);
+    assert.equal(privateFbx, path.join(path.dirname(privateBvh), "out.fbx"));
+    assert.equal(claimed, "wave_01");
+    assert.deepEqual(readdirSync(path.join(daemon.stateRoot, "work")), []);
     assert.deepEqual(run.env, {
       PATH: process.env.PATH,
       LANG: "xx_TEST.UTF-8",
@@ -1651,7 +1657,7 @@ test("rest-fbx is a job whose FBX is readable", async () => {
     const answer = await request(daemon.port, "POST", "/motion/rest-fbx", { body: "{}", headers: { "content-type": "application/json" } });
     assert.equal(answer.status, 200);
     const job = answer.body;
-    assert.match(job.jobId, /^rest-[0-9]{13}$/);
+    assert.match(job.jobId, /^rest-[0-9]{13}-[0-9a-f]{8}$/);
     assert.equal(job.schema, "gamecult.vili.motion_job.v1");
     assert.deepEqual(job.export.clips, [{ file: "SOMA77_Rest.fbx", clipName: "SOMA77_Rest", bones: 78, frames: [1, 60], fps: 30 }]);
     assert.deepEqual(job.files.map((file) => file.name), ["SOMA77_Rest.bvh", "SOMA77_Rest.fbx"]);

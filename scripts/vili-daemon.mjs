@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import http from "node:http";
 import os from "node:os";
-import { createHash, randomInt } from "node:crypto";
-import { closeSync, lstatSync, openSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
-import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash, randomBytes, randomInt } from "node:crypto";
+import { closeSync, constants, lstatSync, openSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { copyFile, mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline";
 import net from "node:net";
@@ -564,44 +564,88 @@ async function probeBlender() {
   blender.version = run.code === 0 && run.first?.startsWith("Blender ") ? run.first : null;
 }
 
-// One BVH to one FBX beside it. The FBX counts only if Blender exits 0, prints its result line and the file exists.
-// A failure names the exit or the signal and never Blender's output.
-async function exportClip(bvh, fbx, clipName, timeoutMs) {
-  const run = await runBlender([
-    "-b", "--factory-startup", "--python-use-system-env", "--python-exit-code", "1",
-    "--python", exportScript, "--", bvh, fbx, clipName,
-  ], timeoutMs);
-  let info = null;
-  if (run.code === 0 && run.result !== null) {
-    try {
-      const parsed = JSON.parse(run.result);
-      if (Number.isInteger(parsed.bones) && Array.isArray(parsed.frames) && parsed.frames.length === 2
-        && parsed.frames.every(Number.isInteger) && Number.isFinite(parsed.fps)) info = parsed;
-    } catch {
-      // not the result line
-    }
+// The bytes of a regular file strictly inside `directory`, or null. The file is opened without following a symlink
+// and the open file is the one checked, so a path swapped after the check cannot redirect the read.
+async function readInside(file, directory) {
+  let handle = null;
+  try {
+    handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const opened = await handle.stat();
+    if (!opened.isFile() || !regularFileInside(file, directory)) return null;
+    const named = lstatSync(file);
+    if (named.dev !== opened.dev || named.ino !== opened.ino) return null;
+    return await handle.readFile();
+  } catch {
+    return null;
+  } finally {
+    await handle?.close();
   }
-  if (info && isRegularFile(fbx)) return { clip: { file: fbx, clipName, bones: info.bones, frames: info.frames, fps: info.fps } };
-  const how = run.code === 0 ? "no result" : run.code !== null ? `exit ${run.code}` : `signal ${run.signal ?? "none"}`;
-  return { error: `fbx-export-failed (${how})` };
+}
+
+// One BVH to one FBX beside it. Blender never sees a path in the job's artifact directory: it reads a private copy of
+// the BVH and writes a private FBX in a directory made for this export alone, and the FBX is then created beside the
+// BVH exclusively, so nothing planted at either path is read, written through or replaced. The FBX counts only if
+// Blender exits 0, prints its result line and its file exists. A failure names the exit or the signal and never
+// Blender's output.
+async function exportClip(bvh, fbx, clipName, timeoutMs, artifactDir) {
+  const input = await readInside(bvh, artifactDir);
+  if (input === null) return { error: "fbx-export-refused" };
+  guard();
+  await mkdir(path.join(args.stateRoot, "work"), { recursive: true });
+  guard();
+  const work = await mkdtemp(path.join(args.stateRoot, "work", "export-"));
+  try {
+    const privateBvh = path.join(work, "in.bvh");
+    const privateFbx = path.join(work, "out.fbx");
+    guard();
+    await writeFile(privateBvh, input, { flag: "wx" });
+    const run = await runBlender([
+      "-b", "--factory-startup", "--python-use-system-env", "--python-exit-code", "1",
+      "--python", exportScript, "--", privateBvh, privateFbx, clipName,
+    ], timeoutMs);
+    let info = null;
+    if (run.code === 0 && run.result !== null) {
+      try {
+        const parsed = JSON.parse(run.result);
+        if (Number.isInteger(parsed.bones) && Array.isArray(parsed.frames) && parsed.frames.length === 2
+          && parsed.frames.every(Number.isInteger) && Number.isFinite(parsed.fps)) info = parsed;
+      } catch {
+        // not the result line
+      }
+    }
+    const made = info ? await readInside(privateFbx, work) : null;
+    if (made !== null) {
+      guard();
+      try {
+        await writeFile(fbx, made, { flag: "wx" });
+        return { clip: { file: fbx, clipName, bones: info.bones, frames: info.frames, fps: info.fps } };
+      } catch (error) {
+        if (error instanceof LeaseLost) throw error;
+        return { error: "fbx-export-refused" };
+      }
+    }
+    const how = run.code === 0 ? "no result" : run.code !== null ? `exit ${run.code}` : `signal ${run.signal ?? "none"}`;
+    return { error: `fbx-export-failed (${how})` };
+  } finally {
+    if (mayWrite()) await rm(work, { recursive: true, force: true });
+  }
 }
 
 // Every BVH the worker listed becomes an FBX, or the job fails. A listed BVH must be a regular file inside the job's
-// artifact directory, and all are checked before Blender starts for any. Sample N of several is <clipName>_NN.
+// artifact directory, and that is decided when its export begins (exportClip), never earlier. Sample N of several is
+// <clipName>_NN.
 async function exportListed(listed, artifactDir, clipName, timeoutMs) {
   const bvhs = [];
   for (const file of Array.isArray(listed) ? listed : []) {
     if (typeof file !== "string" || !file.endsWith(".bvh")) continue;
-    const full = path.resolve(artifactDir, file);
-    if (!regularFileInside(full, artifactDir)) return { clips: [], error: "fbx-export-refused" };
-    bvhs.push(full);
+    bvhs.push(path.resolve(artifactDir, file));
   }
   if (bvhs.length === 0) return { clips: [], error: "fbx-export-failed (no bvh)" };
   bvhs.sort();
   const clips = [];
   for (const [index, bvh] of bvhs.entries()) {
     const name = bvhs.length === 1 ? clipName : `${clipName}_${String(index).padStart(2, "0")}`;
-    const done = await exportClip(bvh, `${bvh.slice(0, -".bvh".length)}.fbx`, name, timeoutMs);
+    const done = await exportClip(bvh, `${bvh.slice(0, -".bvh".length)}.fbx`, name, timeoutMs, artifactDir);
     if (done.error) return { clips, error: done.error };
     clips.push({ ...done.clip, file: path.relative(artifactDir, done.clip.file).split(path.sep).join("/") });
   }
@@ -751,6 +795,28 @@ async function underLease(response, run) {
   }
 }
 
+// A seed is an integer Kimodo can take: the worker seeds with int(seed), so the daemon records exactly what it sends.
+const SEED_LIMIT = 2 ** 31;
+
+// The one source of job ids, for a generate job and a rest job alike: the clock for order, random bits for
+// uniqueness, and an exclusive mkdir that decides, so two jobs never share a directory, a record or a file.
+async function newJobDir(prefix) {
+  guard();
+  await mkdir(path.join(args.stateRoot, "artifacts"), { recursive: true });
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const jobId = `${prefix}-${Date.now()}-${randomBytes(4).toString("hex")}`;
+    const artifactDir = path.join(args.stateRoot, "artifacts", jobId);
+    guard();
+    try {
+      await mkdir(artifactDir);
+      return { jobId, artifactDir };
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+    }
+  }
+  throw new Error("no free job id");
+}
+
 async function generate(request, response) {
   guard();
   if (workerUnconfigured()) {
@@ -797,21 +863,23 @@ async function generate(request, response) {
     bvhStandardTpose: fbx || boolValue(askedTpose),
   };
 
-  const jobId = `vili-${Date.now()}`;
-  const clipName = fbx ? (body.clipName ?? jobId) : undefined;
-  const artifactDir = path.join(args.stateRoot, "artifacts", jobId);
-  guard();
-  await mkdir(artifactDir, { recursive: true });
-  const duration = firstDefined(body.durationSeconds, body.duration, 4);
   const bodyMeta = typeof body.meta === "object" && body.meta ? body.meta : {};
+  const askedSeed = firstDefined(body.seed, bodyMeta.seed);
+  if (askedSeed !== undefined && !(Number.isInteger(askedSeed) && askedSeed >= 0 && askedSeed < SEED_LIMIT)) {
+    json(response, 400, { ok: false, error: "Invalid seed." });
+    return;
+  }
+
+  const { jobId, artifactDir } = await newJobDir("vili");
+  const clipName = fbx ? (body.clipName ?? jobId) : undefined;
+  const duration = firstDefined(body.durationSeconds, body.duration, 4);
   const diffusionSteps = Math.max(1, Number(firstDefined(
     body.diffusionSteps,
     body.diffusion_steps,
     bodyMeta.diffusion_steps,
     20,
   )));
-  const askedSeed = Number(firstDefined(body.seed, bodyMeta.seed));
-  const seed = Number.isFinite(askedSeed) ? askedSeed : randomInt(0, 2 ** 31);
+  const seed = askedSeed ?? randomInt(0, SEED_LIMIT);
   const numSamples = Math.max(1, Number(firstDefined(
     body.numSamples,
     body.num_samples,
@@ -944,10 +1012,7 @@ async function restFbx(response) {
     json(response, 503, { ok: false, code: "rest-skeleton-missing" });
     return;
   }
-  const jobId = `rest-${Date.now()}`;
-  const artifactDir = path.join(args.stateRoot, "artifacts", jobId);
-  guard();
-  await mkdir(artifactDir, { recursive: true });
+  const { jobId, artifactDir } = await newJobDir("rest");
   guard();
   await copyFile(restBvh, path.join(artifactDir, "SOMA77_Rest.bvh"));
   const exported = await exportListed([path.join(artifactDir, "SOMA77_Rest.bvh")], artifactDir, "SOMA77_Rest", EXPORT_TIMEOUT_MS);
@@ -970,7 +1035,7 @@ async function restFbx(response) {
 }
 
 // Reads only: a job's own FBX and BVH files, by exact name, regular files inside the job's artifact directory.
-const ARTIFACT_ROUTE = /^\/motion\/artifacts\/((?:vili|rest)-[0-9]{13})\/(motion\.fbx|motion\.bvh|SOMA77_Rest\.fbx|motion\/motion_[0-9]{2}\.(?:fbx|bvh))$/;
+const ARTIFACT_ROUTE = /^\/motion\/artifacts\/((?:vili|rest)-[0-9]{13}-[0-9a-f]{8})\/(motion\.fbx|motion\.bvh|SOMA77_Rest\.fbx|motion\/motion_[0-9]{2}\.(?:fbx|bvh))$/;
 
 async function serveArtifact(response, jobId, name) {
   const directory = path.join(args.stateRoot, "artifacts", jobId);
