@@ -766,13 +766,16 @@ for (let trial = 1; trial <= 40; trial += 1) {
   });
 }
 
-const idunnDaemon = async ({ leased = false, extraEnv = {} } = {}) => {
+const idunnDaemon = async ({ leased = false, extraEnv = {}, loseAfterMeta = false } = {}) => {
   const root = mkdtempSync(path.join(os.tmpdir(), "vili-test-"));
   const lease = path.join(root, "lease");
   const healthLog = path.join(root, "health.log");
   if (leased) writeFileSync(lease, "");
   const daemon = await startDaemon({
-    root, nested: true, entry: fakeIdunnEntry, extraEnv: { FAKE_IDUNN_LEASE: lease, FAKE_IDUNN_HEALTH_LOG: healthLog, ...extraEnv },
+    root, nested: true, entry: fakeIdunnEntry, extraEnv: {
+      FAKE_IDUNN_LEASE: lease, FAKE_IDUNN_HEALTH_LOG: healthLog, ...extraEnv,
+      ...(loseAfterMeta ? { FAKE_IDUNN_LOSE_AFTER_META: path.join(root, "a", "b", "state", "artifacts") } : {}),
+    },
   });
   return Object.assign(daemon, { lease, health: () => (existsSync(healthLog) ? readFileSync(healthLog, "utf8").split("\n").filter(Boolean) : []) });
 };
@@ -862,6 +865,24 @@ for (const noticed of [false, true]) {
     }
   });
 }
+
+// The lease goes after the job wrote its meta.json and before its worker would start: the spawn is gated at the
+// spawn, not by the request's earlier checks.
+test("a worker is not started, and its directories are not made, once the lease is gone", async () => {
+  const daemon = await idunnDaemon({ leased: true, loseAfterMeta: true });
+  try {
+    await until(() => existsSync(path.join(daemon.stateRoot, "vili.service.cc")), "the service store", 10);
+    const answer = await generate(daemon);
+    assert.equal(answer.status, 503);
+    assert.equal(answer.body.code, "write-lease-lost");
+    assert.deepEqual(daemon.spawns(), []);
+    assert.equal(existsSync(path.join(daemon.stateRoot, "logs")), false);
+    assert.equal(existsSync(path.join(daemon.stateRoot, "embeddings")), false);
+    assert.deepEqual(readdirSync(path.join(daemon.stateRoot, "jobs")), []);
+  } finally {
+    await daemon.stop();
+  }
+});
 
 test("a request arriving right after the lease is lost writes and spawns nothing", async () => {
   const daemon = await idunnDaemon({ leased: true });
