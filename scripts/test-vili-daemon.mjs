@@ -1586,6 +1586,9 @@ test("the artifact read route serves only a job's own FBX and BVH files", async 
     assert.equal(served.raw, "FBX-STUB:BVH-STUB\n");
     assert.equal((await getArtifact(daemon, `${base}/motion.bvh`)).raw, "BVH-STUB\n");
 
+    // a directory that is not a job's own (its id is not vili-<13 digits>) serves nothing even with a file in it
+    mkdirSync(path.join(daemon.stateRoot, "artifacts", "vili-123"), { recursive: true });
+    writeFileSync(path.join(daemon.stateRoot, "artifacts", "vili-123", "motion.fbx"), "PLANTED");
     const refused = [
       `${base}/meta.json`,
       `${base}/request.json`,
