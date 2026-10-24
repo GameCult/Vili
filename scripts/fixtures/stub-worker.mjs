@@ -1,11 +1,11 @@
 // Stands in for kimodo-resident-worker.py in the daemon's tests. It binds port 0, prints the ready line the
 // daemon waits for, and answers /health and /generate with what the daemon gave it. The --model value picks a
 // misbehaviour: crash-before-ready, hang-before-ready, sick, slow-health, stubborn, fail-generate,
-// refuse-generate, drop-generate, slow-generate, writer (appends to <output>.writes every 50 ms, never answers, ignores SIGTERM), slow-to-stop (no answer; prints a line and exits 1.5 s after SIGTERM), chatty (prints a line the moment it is healthy), encoder (a grandchild, then no answer), graceful (exits 0.5 s after SIGTERM), die-after-ready, bvh-outside (lists a BVH outside the job's directory), bvh-link (lists a symlink as its BVH), plant-link (a normal answer with a file symlink and a directory symlink planted beside the BVH). A request with bvh writes <output>.bvh (motion/motion_NN.bvh for several samples) and lists it. Any other value is just the model the worker serves.
+// refuse-generate, drop-generate, slow-generate, writer (appends to <output>.writes every 50 ms, never answers, ignores SIGTERM), slow-to-stop (no answer; prints a line and exits 1.5 s after SIGTERM), chatty (prints a line the moment it is healthy), encoder (a grandchild, then no answer), graceful (exits 0.5 s after SIGTERM), die-after-ready, bvh-outside (lists a BVH outside the job's directory), bvh-link (lists a symlink as its BVH), bvh-fifo (lists a FIFO as its BVH), plant-link (a normal answer with a file symlink and a directory symlink planted beside the BVH). A request with bvh writes <output>.bvh (motion/motion_NN.bvh for several samples) and lists it. Any other value is just the model the worker serves.
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { appendFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 
 const argv = process.argv.slice(2);
@@ -87,6 +87,9 @@ if (model === "hang-before-ready") {
           if (model === "bvh-outside") {
             writeFileSync(outside, "BVH-OUTSIDE\n");
             files = [outside];
+          } else if (model === "bvh-fifo") {
+            execFileSync("mkfifo", [`${payload.output}.bvh`]);
+            files = [`${payload.output}.bvh`];
           } else if (model === "bvh-link") {
             writeFileSync(outside, "BVH-OUTSIDE\n");
             symlinkSync(outside, `${payload.output}.bvh`);

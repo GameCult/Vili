@@ -1869,3 +1869,110 @@ test("the job record lists regular files only: a planted symlink, to a file or t
     await daemon.stop();
   }
 });
+
+// Soul s2: the job id's random suffix is what carries a burst. The clock alone repeats inside one millisecond, and
+// the exclusive mkdir's few retries are spent there, so a constant suffix fails a burst and passes every small test.
+test("four hundred simultaneous generates each get their own job id, directory and record", async () => {
+  const daemon = await startDaemon();
+  try {
+    const answers = await Promise.all(Array.from({ length: 400 }, () => generate(daemon)));
+    assert.deepEqual([...new Set(answers.map((answer) => answer.status))], [200]);
+    const ids = answers.map((answer) => answer.body.jobId);
+    for (const id of ids) assert.match(id, /^vili-\d{13}-[0-9a-f]{8}$/);
+    assert.equal(new Set(ids).size, 400, "no two jobs share an id");
+    assert.equal(readdirSync(path.join(daemon.stateRoot, "artifacts")).length, 400);
+    assert.equal(jobFiles(daemon).length, 400);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+// Soul s2: opening a path that blocks (a FIFO with no writer) must not wait. The open is non-blocking and the check
+// is made on the open descriptor, so the listed node is refused at once and the filesystem threads stay free.
+test("a listed BVH that is a FIFO is refused promptly and other file work proceeds", async () => {
+  const daemon = await startDaemon();
+  const within = (promise, ms, what) => Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${what} did not settle in ${ms} ms`)), ms)),
+  ]);
+  try {
+    // more than libuv's four filesystem threads: a blocking open per request would starve all of them
+    const answers = await within(Promise.all(Array.from({ length: 6 }, () =>
+      generate(daemon, exportRequest({ model: "bvh-fifo", clipName: "canary-fifo-clip" })))), 8000, "the FIFO jobs");
+    for (const answer of answers) {
+      assert.equal(answer.status, 502);
+      assert.equal(answer.body.ok, false);
+      assert.ok(!answer.raw.includes("canary-fifo-clip"), "the refusal does not echo the clip name");
+    }
+    assert.equal(exportStarts(daemon).length, 0, "no Blender for a node that is not a regular file");
+    const other = await within(generate(daemon, exportRequest({ clipName: "after" })), 8000, "an ordinary job");
+    assert.equal(other.status, 200);
+    assert.ok(!daemon.stdout().includes("canary-fifo-clip") && !daemon.stderr().includes("canary-fifo-clip"));
+  } finally {
+    await daemon.stop();
+  }
+});
+
+// Soul s2: work/ is a declared state slot, and a daemon that holds the state root sweeps the export directories a
+// killed daemon left, those and nothing else.
+test("the recipe declares the work directory as a state slot", () => {
+  const recipe = readFileSync(path.join(here, "..", "deployment", "idunn", "recipe.toml"), "utf8");
+  assert.match(recipe, /\[\[state\.slots\]\]\nid = "work"\nrelative_path = "work"\nkind = "external-directory"/);
+});
+
+test("a restarted daemon sweeps the export directories a killed one left, and touches nothing else", async () => {
+  const first = await startDaemon();
+  let second = null;
+  try {
+    const pending = generate(first, exportRequest({ clipName: "slow" })).catch(() => null);
+    await until(() => exportStarts(first).length === 1, "the export to start");
+    const work = path.join(first.stateRoot, "work");
+    const [stale] = readdirSync(work);
+    assert.match(stale, /^export-[A-Za-z0-9]{6}$/);
+    first.proc.kill("SIGKILL");
+    await until(() => first.proc.signalCode !== null, "the daemon to die");
+    await pending;
+    assert.deepEqual(readdirSync(work), [stale], "the killed export left its directory");
+    // things under the state root that are not stale export directories
+    const decoys = {
+      "work/keep": "K",
+      "work/export-short/in.bvh": "S",
+      "work/exports-keep/in.bvh": "E",
+      "jobs/decoy.json": "J",
+      "artifacts/decoy/motion.bvh": "A",
+      "logs/decoy.log": "L",
+      "decoy-root-file": "R",
+    };
+    for (const [relative, text] of Object.entries(decoys)) {
+      mkdirSync(path.dirname(path.join(first.stateRoot, relative)), { recursive: true });
+      writeFileSync(path.join(first.stateRoot, relative), text);
+    }
+    second = await startDaemon({ root: first.root });
+    assert.deepEqual(readdirSync(work).sort(), ["export-short", "exports-keep", "keep"], "the stale export is gone, the rest stays");
+    for (const [relative, text] of Object.entries(decoys)) assert.equal(readFileSync(path.join(second.stateRoot, relative), "utf8"), text, relative);
+    assert.equal((await generate(second, exportRequest({ clipName: "after" }))).status, 200);
+  } finally {
+    if (first.proc.signalCode === null) first.proc.kill("SIGKILL");
+    await (second ?? first).stop();
+  }
+});
+
+test("a daemon that does not hold the state root sweeps nothing", async () => {
+  const first = await startDaemon();
+  let second = null;
+  try {
+    const pending = generate(first, exportRequest({ clipName: "slow" }));
+    await until(() => exportStarts(first).length === 1, "the export to start");
+    const work = path.join(first.stateRoot, "work");
+    const live = readdirSync(work);
+    assert.equal(live.length, 1);
+    second = await startDaemon({ root: first.root, hold: false });
+    await until(() => second.proc.exitCode !== null, "the second daemon to refuse", 20);
+    assert.equal(second.proc.exitCode, 2);
+    assert.deepEqual(readdirSync(work), live, "the live export's directory is still there");
+    assert.equal((await pending).status, 200, "the live export finished");
+  } finally {
+    if (second && second.proc.exitCode === null && second.proc.signalCode === null) second.proc.kill("SIGKILL");
+    await first.stop();
+  }
+});
