@@ -28,9 +28,11 @@ out = {
     "bones": [b.name for b in arm.data.bones],
     "scale": list(arm.scale),
     "hips_rest": arm.data.bones["Hips"].head_local.z * arm.scale.z,
+    "scene": scene.name,
 }
 action = arm.animation_data.action if arm.animation_data else None
 if action is not None:
+    out["action"] = action.name
     first, last = (int(f) for f in action.frame_range)
     def world(name, frame):
         scene.frame_set(frame)
@@ -67,6 +69,11 @@ def convert(bvh, fbx, clip, env=None):
     return blender("--python", str(SCRIPT), "--", str(bvh), str(fbx), clip, env=env)
 
 
+def result(run):
+    line = next(line for line in run.stdout.splitlines() if line.startswith("VILI-FBX "))
+    return json.loads(line[len("VILI-FBX "):])
+
+
 def rest_bvh():
     spec = importlib.util.find_spec("kimodo")
     return pathlib.Path(spec.submodule_search_locations[0]) / "assets" / "skeletons" / "somaskel77" / "somaskel77_standard_tpose.bvh"
@@ -95,8 +102,7 @@ class BvhToFbx(unittest.TestCase):
         fbx = self.dir / "rest.fbx"
         run = convert(self.rest, fbx, "SOMA77_Rest")
         self.assertEqual(run.returncode, 0, run.stderr[-2000:])
-        result = json.loads(next(l for l in run.stdout.splitlines() if l.startswith("VILI-FBX "))[len("VILI-FBX "):])
-        self.assertEqual(result["bones"], 78)
+        self.assertEqual(result(run), {"bones": 78, "frames": [1, 1], "fps": 30})
         joints = re.findall(r"^\s*(?:ROOT|JOINT)\s+(\S+)", self.rest.read_text(), re.M)
         seen = self.inspect(fbx)
         self.assertEqual(len(joints), 78)
@@ -134,7 +140,9 @@ class BvhToFbx(unittest.TestCase):
         fbx = self.dir / "walk.fbx"
         run = convert(bvh, fbx, "walk")
         self.assertEqual(run.returncode, 0, run.stderr[-2000:])
+        self.assertEqual(result(run), {"bones": 78, "frames": [1, frames], "fps": 30})
         seen = self.inspect(fbx)
+        self.assertIn("walk", seen["action"], "the clip name reaches the FBX take")
         self.assertAlmostEqual(seen["hips_travel"], 1.0, delta=0.001, msg=json.dumps(seen))
         self.assertLess(seen["root_wander"], 1e-4)
 
