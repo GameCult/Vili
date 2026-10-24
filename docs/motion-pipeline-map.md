@@ -7,6 +7,30 @@ cuts not yet mapped. The target's rationale is `docs/motion-pipeline-target.md`.
 
 ## Body facts
 
+### FBX export on Yggdrasil, 2026-10-24
+
+Imagination (imagination-vili-fbx-r3, session sp-reentry-2026-10-21), for
+`motion-pipeline:cut_spec:cut-vili-fbx-export.r3`. Source reads are Vili main `c5cf445`. On Yggdrasil,
+everything ran as `gamecultadmin` in `~/scratch/imagination-vili-fbx-r3` (removed afterwards, `df` unchanged at
+1.3 TB free), with `sudo -n` used only to read the live state root and for `docker run --rm` probes. The live unit
+`idunn-vili-43ee8c6f...` (release `sha256-5f0df659...`, 1.8 GB) and `/var/lib/gamecult/vili` were not changed.
+Raven was not touched. Host load was about 1.0 on 16 vCPU.
+
+| Probe | Result |
+|---|---|
+| Blender in the recipe | Absent. `deployment/idunn/recipe.toml` at `c5cf445` has one external input (CPython) and the artifacts `node`, `vili` and `python`. No Blender exists anywhere on Yggdrasil (`find / -maxdepth 7 -name 'blender-5*'`). The tree Idunn sealed in its `big_tree_seals_from_env` test (`idunn-deploy-provenance:cut_report:cut-tree-executable-members.h2`) is gone. |
+| Blender download | `https://download.blender.org/release/Blender5.2/blender-5.2.2-linux-x64.tar.xz`, 383,295,504 bytes, sha256 `84098912789dc450e95697c4184fb8a90acbe5111c2ba4aede3fecb57806a168`, which matches upstream `blender-5.2.2.sha256`. It unpacks to 1.2 GB: 6,547 entries, 79 symlinks, none absolute. `blender -b --version` prints `Blender 5.2.2 LTS (hash d13f752e3b9c built 2026-09-15 01:34:58)`. |
+| Shared libraries | On the host (Debian 13.6), `ldd blender` reports 7 missing: `libXrender.so.1`, `libXfixes.so.3`, `libXi.so.6`, `libxkbcommon.so.0`, `libSM.so.6`, `libICE.so.6`, `libGL.so.1`. Blender exits 127 before `main`. The `python-build` runner image (`buildpack-deps:bookworm@sha256:ccb050a4...`) lacks `libXfixes`, `libXi`, `libxkbcommon` and `libGL`. The binary's `RUNPATH` is `$ORIGIN/lib`, but `libGL.so.1` resolves `libGLX` and `libGLdispatch` without it (RUNPATH is not inherited), so `LD_LIBRARY_PATH=<blender>/lib` is needed as well. |
+| Bundled libraries | Nine bookworm debs (`apt-get download` in the runner image) hold every missing library and its dependencies: libxrender1 1:0.9.10-1.1 `b2a6d160...`, libxfixes3 1:6.0.0-2 `1cd61639...`, libxi6 2:1.8-1+b1 `6c2fb5f2...`, libxkbcommon0 1.5.0-1 `e3fe045b...`, libsm6 2:1.2.3-1 `22a42089...`, libice6 2:1.0.10-1 `452796e5...`, libgl1 1.6.0-1 `6f89b170...`, libglx0 1.6.0-1 `95f568df...` and libglvnd0 1.6.0-1 `b6da5b15...` (the full digests are in the cut spec). Their `usr/lib/x86_64-linux-gnu/*.so*` (18 entries, symlinks relative) are copied into `blender/lib`. With `LD_LIBRARY_PATH=<blender>/lib`, nothing is missing on the host or in the runner (`--network none --read-only --user 65532`), and Blender runs in both. |
+| A generated clip | The live release's own interpreter and worker (`python/bin/python3.12 vili/scripts/kimodo-resident-worker.py`), run at nice 10 with 8 threads, the models root read-only and a scratch copy of the live embedding cache. The prompt was 'A person walks forward happily, pumping both fists in the air to celebrate.', 3 s, seed 7, `bvh` and `bvhStandardTpose`. The worker was ready in 11 s. Generation took 53.3 s the first time (an encoder miss) and 15.0 s the second (a hit). Both runs produced 90 frames at 30 fps, and their BVH (sha256 `e2d29634...`) and NPZ (`bf7def08...`) were byte-identical. |
+| BVH layout (Kimodo `kimodo/exports/bvh.py`, as installed in the release) | `ROOT Root` is a wrapper at the origin whose channels are keyed to zero. `JOINT Hips` carries the 6-channel world trajectory in cm. So the travel is on Hips: across the clip Hips moved 2.56 m forward (Blender `-Y`) in 2.97 s. |
+| Conversion | The r2 settings (BVH import at `global_scale 0.01`, `axis_forward -Z`, `axis_up Y`; FBX export with no leaf bones, full bake and `simplify 0.0`), in a scratch `bvh_to_fbx_probe.py`. Per 3 s clip: 1.1 to 4.0 s wall (cold first), 2.6 to 4.6 s CPU, 350 to 377 MB max RSS. Output: 78 bones (`Root, Hips, Spine1...`), frames 1-90, Hips at rest 1.00 m, Head 1.598 m, and a 949,388-byte binary FBX. The rest BVH (`kimodo/assets/skeletons/somaskel77/somaskel77_standard_tpose.bvh`, 1 frame) gives a 457,852-byte FBX with Hips at 1.00 m. |
+| Determinism | Two exports of one BVH differ in 15,126 bytes. One cause is FBX object UUIDs: `io_scene_fbx/fbx_utils.py:826-842` `_key_to_uuid` uses Python `hash()` on strings, which is randomized per process. Blender ignores `PYTHONHASHSEED` unless it gets `--python-use-system-env`. The other cause is `CreationTimeStamp`: `export_fbx_bin.py:3235` calls `datetime.datetime.now()`; `FileId` and `CreationTime` are already constants. With `PYTHONHASHSEED=0` and `--python-use-system-env`, and with the script replacing that module's `datetime` by a fixed 1970-01-01, the output is byte-identical: across two processes, across the BVHs of two generation runs, and under `env -i` with `HOME=/nonexistent` and `PYTHONNOUSERSITE=1`. sha256 `f92bd412d0cd78657ed68677564bbd31ca238f4f2c6b34c0a596efb064bc0fc9`, both with the host's trixie libraries and with the bundled bookworm ones. Changing only the seed flag still varies the UUIDs; changing only the time pin still varies 2 timestamp bytes. Decoded with Blender's own `parse_fbx`, those variants have identical values (max diff 0). |
+| Across glibc | The same BVH exported in the bookworm runner and on the trixie host gives FBX files 80 bytes apart. Decoded, 2,224 of 9,680 elements differ, all `AnimationCurve` values and `Model` properties, by at most 4.2e-5. So the FBX is byte-reproducible on one host body, and the BVH is the reproducibility unit across bodies. |
+| Re-import (Blender) | The FBX imports back as one armature with scale 1, 78 bones, SOMA names, no `mixamorig`, 90 frames and the same Hips trajectory. The take is named after the scene, so the script renames the scene to the clip name (the take then reads `winner_probe`). |
+| Unity import smoke (Starfire, Unity 2021.3.45f2 batchmode, a scratch project in the session scratchpad, never the StreamPixels checkout) | Rest FBX as Human/CreateFromThisModel: `isValid True`, `isHuman True`, 79 transforms, Hips y 1.000, Head y 1.598, root scale 1, `fileScale 1`. The auto-map is off by one in the fingers (`LeftHandIndex1 -> Left Index Proximal`), as recorded on 2026-10-23, which is the avatar cut's table to fix. Clip as Human/CopyFromOther: `humanMotion True`, length 2.9667 s (89/30), `hasRootCurves True`, `averageSpeed (0.073, 0.030, 0.858)` m/s, `apparentSpeed 0.863`. With Bake Into Pose (XZ, Y, rotation) the same clip is in place: `averageSpeed (0, 0, 0)`. |
+| Disk per job | NPZ 587 KB, BVH 207 KB, FBX 949 KB for a 3 s clip: about 1.7 MB. The release grows by about 1.2 GB (Blender) plus the 18 library entries. |
+
 ### Admission under Idunn, 2026-10-23
 
 Imagination (imagination-vili-admission, session sp-reentry-2026-10-21), for
@@ -188,7 +212,9 @@ Vili. `<models>` is `--models-root`, `/srv/vili/models` on Yggdrasil.
 | Encoder child | one per request with cache misses, spawned by the worker | lives about a minute on CPU (55 s cold, 14.3 GiB peak), then exits | the worker's `CachedTextEncoder`; assembly B, CPU, bf16 |
 | Motion job (`<state>/jobs/<jobId>.json`) | `vili-<epoch ms>` | written once when a job ends | the daemon |
 | Text embedding (`<state>/embeddings/text-embeddings.cc`) | `sha256(identity, text)`; the identity names assembly, device, dtype, the three repo revisions, torch, transformers, peft, accelerate, the Kimodo commit and the encoder child's own sha256 | appended on miss; a changed identity misses and leaves old rows inert | the worker's cache. Raven's file (assembly A on GPU) is not carried over |
-| Clip artifact (`<state>/artifacts/<jobId>/motion*.bvh`, `motion*.fbx`, `meta.json`) | the job id; `clipName` inside the FBX | written once per job; the BVH is the reproducibility unit, the FBX is derived | the daemon (export) from Kimodo's BVH; FBX planned by `cut-vili-fbx-export` |
+| Clip artifact (`<state>/artifacts/<jobId>/motion*.bvh`, `motion*.fbx`, Kimodo's `meta.json`) | the job id; `clipName` names the FBX's armature, action and take | written once per job, never rewritten. The BVH is the reproducibility unit across host bodies, and the FBX is byte-identical for one BVH on one body. Read back through `GET /motion/artifacts/<jobId>/<file>` | the daemon (export, under the same write gate as generation) from Kimodo's BVH; Blender only converts. Planned by `cut-vili-fbx-export` r3 |
+| Clip provenance (the job record `gamecult.vili.motion_job.v1`) | the job id | written once when a job ends; it carries the seed used (minted when absent), the worker's model, encoder and Kimodo identity, the export block (Blender version, script sha256, the determinism settings, clip names) and the sha256 of every artifact file | the daemon. Still JSON until `vili-jobs-cultcache` |
+| Blender (`blender/` in the release: Blender 5.2.2 LTS linux-x64 plus nine bookworm libraries in `blender/lib`) | the tarball's sha256 and the nine debs' sha256, all `external_inputs` | rebuilt into each release, sealed 0444 with `blender` the one 0555 member; run once per exported clip | the recipe; the daemon spawns it with a fixed environment |
 | Model weights (`<models>` = `HF_HOME`, hub layout under `hub/`, with `SHA256SUMS` beside it) | repo id and snapshot revision | provisioned by agents on the host, checked once with `sha256sum -c` at provisioning; read-only to Vili (`read_only_paths`); changed only by a new manifest | host provisioning (runbook `gamecult-ops/runbooks/vili-idunn.md`); the worker's identity records the snapshot revisions it loaded |
 | Worker environment (`python/` in the release: PBS CPython 3.12.15 with the two hash-locked requirement files and Kimodo, MotionCorrection and SOMA-X installed into its own site-packages; no venv) | `cpython-3.12.15+20261021` plus the sha256 of the two lock files, computed by the Idunn entry from the sealed files | rebuilt by the recipe on each release, sealed 0444 with `bin/python3.12` the one 0555 member | the recipe (`worker-python-pbs-in-release`) |
 | Writer authority over `<state>` | under Idunn: the process write lease Idunn grants this incarnation; run by hand: `<state>/daemon.lock`, a Unix socket the live daemon listens on | lease: granted after the incumbent is fenced, checked every 5 s, lost on fence; lock: taken at start, refused while another daemon answers on it, reclaimed when stale | Idunn (lease); the daemon run by hand (lock). Nothing writes `<state>` before it holds one |
@@ -225,8 +251,7 @@ Vili. `<models>` is `--models-root`, `/srv/vili/models` on Yggdrasil.
   for Thing 2 (`surfaces-wait-for-thing2`).
 - Blender for FBX export rides in the same release, as a pinned, sha256-checked Linux tarball
   (`external_inputs`) with `blender` as an executable member, under the same Idunn contract as
-  the interpreter. Headless Linux Blender's shared libraries (`libxi6`, `libxkbcommon0`,
-  `libsm6`, `libxrender1`, `libgl1`) are host packages; the FBX cut probes them first.
+  the interpreter. Its missing X and GL libraries ride with it (see "The FBX export" below).
 
 **Why the worker is a child, not a second target.** It has no lifecycle of its own: it is useless
 without the daemon, and the daemon is useless without it. A separate Idunn target would buy a
@@ -351,6 +376,75 @@ Idunn, health is signed presence; `GET /health` stays as a plain probe for agent
 trees, which are removed when the dry run ends. Hands stops if free space on `/` falls below
 1.2 TB.
 
+### The FBX export
+
+**The FBX carries the true trajectory, on Hips.** Kimodo's BVH keeps the `Root` wrapper still at
+the origin and puts the world translation on `Hips`. Vili passes that through unchanged. Unity's
+Humanoid importer turns the body's motion into root curves (`hasRootCurves`), so one FBX serves both
+uses: root motion (`applyRootMotion`, 0.858 m/s forward on the probe clip) or in place (Bake Into
+Pose, after which `averageSpeed` reads 0). The speed for in-place use is the engine's measurement:
+read `averageSpeed` on the root-motion import, which Unity scales by the target avatar's
+`humanScale`. Vili does not export in place and does not compute a speed. Taking the travel out
+is lossy, it is a per-consumer choice, and with the trajectory gone, the foot contacts Kimodo's
+post-processing fixed would slide. A speed computed in Vili would be in SOMA metres, a measurement
+that belongs to the engine (`engine-owns-retargeting`). Whether the RPS exits use root motion or
+in-place with that speed is the slot-clips work's choice
+(`rps:ruling:rps-duelists-exit-celebrating-moping`). The run-in precedent points to in-place with a
+speed, because the overlay already moves each duelist itself.
+
+**Determinism is three settings, and each is pinned by a test.** `PYTHONHASHSEED=0` with
+`--python-use-system-env` fixes the FBX object ids, and the script replaces `export_fbx_bin`'s
+`datetime` with a fixed 1970-01-01 so the header stamp stops varying. The script refuses to run while
+`sys.flags.hash_randomization` is set. So a missing flag fails the export instead of quietly
+producing bytes that differ between runs. The provenance records real times; the file's own header
+time is a constant. Across host bodies (glibc 2.36 against 2.41) the curves differ by up to 4.2e-5,
+so a golden FBX hash cannot be checked in the runner. The recipe's test checks that the export
+repeats within one body and checks the file's structure. The BVH is the unit compared across bodies.
+
+**Blender's libraries travel in the release.** Neither Yggdrasil (trixie) nor the `python-build`
+runner (bookworm) has Blender's seven X and GL libraries. Installing host packages would leave the
+build-time test without them, and would make the release depend on an apt step that no recipe can
+check. Bookworm's builds run on both bodies, because glibc is backward compatible. So the nine debs
+are sha256-pinned `external_inputs` from snapshot.debian.org, which keeps a fixed URL after a point
+release removes a version from the pool. One small script unpacks their libraries into
+`blender/lib`. The daemon sets `LD_LIBRARY_PATH` for the Blender child only, because `RUNPATH`
+does not reach `libGL`'s own dependencies.
+
+**The daemon owns export, not the worker.** The worker owns generation, and its intake is still
+open to local callers (`vili-worker-intake-local-callers`). If export ran in the worker, that open
+intake would grow by a converter and a new output path. In the daemon, the FBX path comes from the
+job id. The BVH inputs are the worker's listed files, but only those that resolve to regular files
+inside the job's artifact directory. Blender runs in its own process group. The daemon calls
+`guard()` immediately before each spawn and each write. A lease loss SIGKILLs the group, and SIGTERM
+stops it, exactly as for the worker. So **closing the worker's intake is not a dependency** of this
+cut: export adds no caller-chosen path and no new intake. The fix stays the next Vili cut on its own
+merits.
+
+**Provenance is the job record, not a second file.** r2 put a provenance block into Kimodo's
+`meta.json`. That made a Kimodo input file carry keys Kimodo does not know, and it duplicated what the
+job record already holds: the request, and the worker's model, encoder and Kimodo identity. r3 bumps
+the job record to `motion_job.v1` and adds the seed used, an export block, and the sha256 of every
+artifact file. The generate answer is that record, so a consumer that commits a clip
+(`clips-committed`) saves the answer beside the FBX. The record is JSON until `vili-jobs-cultcache`.
+
+**A read route, because a hand copy is a hand step.** Under Idunn the state root is `root:vili-state
+2770`, and a caller on Starfire cannot read it without `sudo` on Yggdrasil. `GET
+/motion/artifacts/<jobId>/<file>` serves one regular file from a job's artifact directory. Its names
+are allowlisted (`motion.fbx`, `motion.bvh`, `motion/motion_NN.fbx|bvh`), and it serves no symlinks.
+Reads take no lease. It is an API (`vili.motion.api`), not an operator surface, so
+`surfaces-wait-for-thing2` does not hold it.
+
+**The rest FBX is a job too.** r2 had a one-shot CLI mode. Under Idunn that means an `ssh`, a
+`sudo` and the release's `node` by hand, and its output had no record. `POST /motion/rest-fbx`
+converts the release's own Kimodo `somaskel77_standard_tpose.bvh` through the same script. It runs
+under the same write gate, writes a job record, and is read back by the same route. That makes
+it the avatar cut's source.
+
+**The seed is always recorded.** A request without a seed used to reach Kimodo unseeded and leave
+no seed in the record, so no artifact could be reproduced. The daemon now mints one
+(`crypto.randomInt(0, 2**31)`) and records it for every job, FBX or not
+(`artifact-provenance`).
+
 ### Earlier decisions
 
 - **Blender stays; the FBX SDK does not come in.** Skipping Blender would save
@@ -377,13 +471,15 @@ trees, which are removed when the dry run ends. Hands stops if free space on `/`
 
 ## Cuts not yet mapped
 
-`cut-vili-admission` is mapped (its spec is in the mind). After it, one line each:
+`cut-vili-admission` is merged (`c5cf445`), and `cut-vili-fbx-export` r3 is mapped (its spec is in
+the mind). One line each for the rest:
 
 - **Raven teardown** (the list under "What retires on Raven"), and Self supersedes the Raven
-  rulings with it. Waits on admission verified end to end on Yggdrasil.
-- **`cut-vili-fbx-export` r3**, refreshed onto the Yggdrasil body (Linux Blender 5.2.2 in the
-  release as an executable member, no gate dependency). Waits on admission.
-- **`cut-soma-humanoid-avatar` r3**, sources taken from Yggdrasil instead of Raven. Waits on the
-  FBX cut.
-- **RPS slot clips** (`motion-pipeline:follow_up:rps-slot-clips-from-vili`). Waits on both r3 cuts.
-- **Vili publishes to Odin over CultMesh**, as StreamPixels' service does. Waits on admission.
+  rulings with it. Waits on nothing now that admission is live.
+- **`cut-soma-humanoid-avatar` r3**, its rest FBX taken from `POST /motion/rest-fbx` on Yggdrasil
+  instead of Raven. Waits on the FBX cut.
+- **RPS slot clips** (`motion-pipeline:follow_up:rps-slot-clips-from-vili`; Winner and Loser travel,
+  `rps:ruling:rps-duelists-exit-celebrating-moping`). Waits on the avatar cut.
+- **Vili intake closed** (`motion-pipeline:follow_up:vili-worker-intake-local-callers` and
+  `vili-caller-read-paths-2`). Independent of the FBX cut.
+- **Vili publishes to Odin over CultMesh**, as StreamPixels' service does. Waits on nothing.
