@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -91,11 +92,16 @@ async function startDaemon({
     spawns: () => spawnLog().filter((line) => /^\d+$/.test(line)).map(Number),
     grandchildren: () => spawnLog().filter((line) => line.startsWith("grandchild ")).map((line) => Number(line.split(" ")[1])),
     async stop() {
-      if (proc.exitCode === null && proc.signalCode === null) {
-        proc.kill("SIGTERM");
-        await until(() => proc.exitCode !== null || proc.signalCode !== null, "the daemon to exit", 30);
+      try {
+        if (proc.exitCode === null && proc.signalCode === null) {
+          proc.kill("SIGTERM");
+          await until(() => proc.exitCode !== null || proc.signalCode !== null, "the daemon to exit", 30);
+        }
+      } finally {
+        // a daemon that did not stop on SIGTERM must not outlive the test and hold the run open
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+        rmSync(root, { recursive: true, force: true });
       }
-      rmSync(root, { recursive: true, force: true });
     },
   };
 }
@@ -449,6 +455,27 @@ test("a live worker outside the pid file's group is left alone", async () => {
   }
 });
 
+// The marker that proves a group is ours is this state root's own embeddings directory. A live worker of another
+// state root, named by a stale pid file, carries another root's marker and is left alone.
+test("a pid file naming another state root's live worker kills nothing", async () => {
+  const other = await startDaemon();
+  const root = mkdtempSync(path.join(os.tmpdir(), "vili-test-"));
+  try {
+    assert.equal((await generate(other)).status, 200);
+    const [foreign] = other.spawns();
+    writeFileSync(path.join(root, "worker.pid"), `${foreign}\n`);
+    const daemon = await startDaemon({ root });
+    try {
+      assert.ok(isAlive(foreign), "a worker carrying another root's marker must survive the reclaim");
+      assert.equal(existsSync(path.join(root, "worker.pid")), false, "the stale pid file is still forgotten");
+    } finally {
+      await daemon.stop();
+    }
+  } finally {
+    await other.stop();
+  }
+});
+
 test("a pid file naming a process group that is not the worker's kills nothing", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "vili-test-"));
   const bystander = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
@@ -711,6 +738,34 @@ test("a second daemon on a live state root exits 2 and kills nothing", async () 
   }
 });
 
+// Two daemons start together over the lock a crashed daemon left. Exactly one owns the root, every time: the
+// other exits 2, and one generate leaves one worker on the root.
+for (let trial = 1; trial <= 40; trial += 1) {
+  test(`two daemons racing a crashed daemon's lock leave one owner and one worker (trial ${trial})`, async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "vili-test-"));
+    const crashed = await startDaemon({ root });
+    crashed.proc.kill("SIGKILL");
+    await until(() => crashed.proc.exitCode !== null || crashed.proc.signalCode !== null, "the first daemon to die");
+    const racers = await Promise.all([startDaemon({ root, hold: false }), startDaemon({ root, hold: false })]);
+    try {
+      await until(() => racers.every((racer) => racer.proc.exitCode !== null || /holds the state root/.test(racer.stdout())), "both racers to decide", 20);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const owners = racers.filter((racer) => racer.proc.exitCode === null);
+      assert.equal(owners.length, 1, "exactly one daemon stays up");
+      assert.match(owners[0].stdout(), /holds the state root/);
+      const loser = racers.find((racer) => racer !== owners[0]);
+      assert.equal(loser.proc.exitCode, 2);
+      assert.match(loser.stderr(), /held by a running daemon/);
+      for (const racer of owners) assert.equal((await generate(racer)).status, 200);
+      assert.equal(aliveWorkers(owners[0]).length, 1, "one worker on the root");
+    } finally {
+      for (const racer of racers) if (racer.proc.exitCode === null && racer.proc.signalCode === null) racer.proc.kill("SIGKILL");
+      for (const pid of racers[0].spawns()) { try { process.kill(-pid, "SIGKILL"); } catch { /* gone */ } }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
 const idunnDaemon = async ({ leased = false, extraEnv = {} } = {}) => {
   const root = mkdtempSync(path.join(os.tmpdir(), "vili-test-"));
   const lease = path.join(root, "lease");
@@ -776,15 +831,107 @@ test("losing the lease kills the worker tree, refuses, and writes nothing more",
   }
 });
 
+// A generate whose headers are in and whose body is still arriving when the lease goes. The lease is gone, so
+// nothing is created and nothing is spawned when the body completes, whether the daemon has noticed the loss yet
+// (its 5 s tick) or not.
+for (const noticed of [false, true]) {
+  test(`a request in flight when the lease is lost writes and spawns nothing (loss ${noticed ? "noticed" : "not yet noticed"})`, async () => {
+    const daemon = await idunnDaemon({ leased: true });
+    try {
+      await until(() => existsSync(path.join(daemon.stateRoot, "vili.service.cc")), "the service store", 10);
+      const body = JSON.stringify({ prompt: "x", duration: 2 });
+      const socket = net.connect(daemon.port, "127.0.0.1");
+      let raw = "";
+      socket.on("data", (chunk) => { raw += chunk; });
+      const closed = new Promise((resolve) => socket.on("close", resolve));
+      socket.write(`POST /motion/generate HTTP/1.1\r\nhost: vili\r\ncontent-type: application/json\r\ncontent-length: ${body.length}\r\nconnection: close\r\n\r\n${body.slice(0, 5)}`);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      rmSync(daemon.lease);
+      if (noticed) await until(() => daemon.health().join() === "active,degraded", "the daemon to notice the loss", 15);
+      socket.write(body.slice(5));
+      await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, 15000))]);
+      socket.destroy();
+      assert.match(raw, /^HTTP\/1\.1 503 /);
+      assert.match(raw, /write-lease-lost/);
+      assert.deepEqual(daemon.spawns(), [], "no worker is spawned after the loss");
+      const artifacts = path.join(daemon.stateRoot, "artifacts");
+      assert.deepEqual(existsSync(artifacts) ? readdirSync(artifacts) : [], [], "no artifact directory is created");
+      assert.deepEqual(readdirSync(path.join(daemon.stateRoot, "jobs")), []);
+    } finally {
+      await daemon.stop();
+    }
+  });
+}
+
+test("a request arriving right after the lease is lost writes and spawns nothing", async () => {
+  const daemon = await idunnDaemon({ leased: true });
+  try {
+    await until(() => existsSync(path.join(daemon.stateRoot, "vili.service.cc")), "the service store", 10);
+    rmSync(daemon.lease);
+    const answer = await generate(daemon);
+    assert.equal(answer.status, 503);
+    assert.equal(answer.body.code, "write-lease-lost");
+    assert.deepEqual(daemon.spawns(), []);
+    const artifacts = path.join(daemon.stateRoot, "artifacts");
+    assert.deepEqual(existsSync(artifacts) ? readdirSync(artifacts) : [], []);
+    assert.deepEqual(readdirSync(path.join(daemon.stateRoot, "jobs")), []);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("a worker respawned under the lease is killed when the lease is lost", async () => {
+  const daemon = await idunnDaemon({ leased: true });
+  try {
+    await until(() => existsSync(path.join(daemon.stateRoot, "vili.service.cc")), "the service store", 10);
+    assert.equal((await generate(daemon)).status, 200);
+    const [first] = daemon.spawns();
+    process.kill(-first, "SIGKILL");
+    await until(async () => (await backendOf(daemon)).state === "stopped", "the daemon to see the worker gone");
+    assert.equal((await generate(daemon)).status, 200);
+    const second = daemon.spawns().find((pid) => pid !== first);
+    assert.ok(second && isAlive(second));
+    rmSync(daemon.lease);
+    await until(() => !isAlive(second), "the respawned worker to die", 20);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+// Idunn stops an incumbent (SIGTERM to the unit) before it revokes the lease. What Vili owns in that sequence: the
+// worker tree is dead when the process ends, it exits 0, and nothing is written from the signal on.
+test("on SIGTERM the daemon stops its worker tree, writes nothing more, and exits 0", async () => {
+  const daemon = await idunnDaemon({ leased: true });
+  try {
+    await until(() => existsSync(path.join(daemon.stateRoot, "vili.service.cc")), "the service store", 10);
+    assert.equal((await generate(daemon, { prompt: "x", model: "stubborn" })).status, 200);
+    const [worker] = daemon.spawns();
+    const [grandchild] = await until(() => { const found = daemon.grandchildren(); return found.length ? found : null; }, "the armed grandchild");
+    const store = path.join(daemon.stateRoot, "vili.service.cc");
+    const before = statSync(store).mtimeMs;
+    const jobs = readdirSync(path.join(daemon.stateRoot, "jobs"));
+    daemon.proc.kill("SIGTERM");
+    await until(() => daemon.proc.exitCode !== null || daemon.proc.signalCode !== null, "the daemon to exit", 30);
+    assert.equal(daemon.proc.exitCode, 0);
+    assert.ok(!isAlive(worker) && !isAlive(grandchild), "the worker tree is dead when the daemon is gone");
+    assert.equal(statSync(store).mtimeMs, before, "the 5 s surface tick must not write during the stop");
+    assert.deepEqual(readdirSync(path.join(daemon.stateRoot, "jobs")), jobs);
+    assert.ok(existsSync(daemon.lease), "the daemon never touches the lease Idunn revokes");
+  } finally {
+    await daemon.stop();
+  }
+});
+
 test("a job that finishes after the lease is lost is not recorded", async () => {
   const daemon = await idunnDaemon({ leased: true });
   try {
     await until(() => existsSync(path.join(daemon.stateRoot, "vili.service.cc")), "the service store", 10);
     const slow = generate(daemon, { prompt: "x", model: "slow-generate" });
+    slow.catch(() => {}); // a failing assertion below must not leave this request pending
     await until(() => daemon.spawns().length, "the worker");
     await until(() => request(daemon.port, "GET", "/health").then((r) => r.body?.state?.backend?.state === "ready"), "the worker to be ready");
     rmSync(daemon.lease);
-    const answer = await slow;
+    const answer = await Promise.race([slow, new Promise((resolve) => setTimeout(() => resolve({ status: "no answer in 30 s" }), 30000))]);
     assert.equal(answer.status, 503);
     assert.equal(answer.body.code, "write-lease-lost");
     assert.deepEqual(readdirSync(path.join(daemon.stateRoot, "jobs")), []);
@@ -864,10 +1011,13 @@ test("the entry takes exactly --state-root <absolute> --kimodo-commit <40 hex>, 
     assert.equal(answer.code, 2, JSON.stringify(args));
     assert.ok(!answer.output.includes("canary"), `the refusal repeated a value of ${JSON.stringify(args)}`);
   }
-  const bind = await runEntry(good, { GAMECULT_IDUNN_CANDIDATE_BIND: "canary-not-a-bind" });
-  assert.equal(bind.code, 2);
-  assert.match(bind.output, /CANDIDATE_BIND is not host:port/);
-  assert.ok(!bind.output.includes("canary"));
+  for (const badBind of ["canary-not-a-bind", "127.0.0.1:65536", "127.0.0.1:99999", "127.0.0.1:123456", "127.0.0.1:"]) {
+    const bind = await runEntry(good, { GAMECULT_IDUNN_CANDIDATE_BIND: badBind });
+    assert.equal(bind.code, 2, badBind);
+    assert.match(bind.output, /CANDIDATE_BIND is not host:port/);
+    assert.ok(!bind.output.includes("canary"));
+    assert.ok(!bind.output.includes("65536") && !bind.output.includes("99999"));
+  }
 });
 
 test("the entry derives the daemon's host, port, interpreter and environment identity from the release", async () => {
@@ -880,6 +1030,7 @@ test("the entry derives the daemon's host, port, interpreter and environment ide
     writeFileSync(path.join(release, "vili", "deployment", "idunn", "requirements-build.lock"), "build lock bytes\n");
     writeFileSync(path.join(release, "vili", "deployment", "idunn", "requirements.lock"), "runtime lock bytes\n");
     const entryDir = path.join(release, "vili", "scripts");
+    assert.equal(daemonEnvironment("127.0.0.1:65535", entryDir).VILI_DAEMON_PORT, "65535", "the top of the port range is accepted");
     for (const bind of ["127.0.0.1:18861", "http://127.0.0.1:18861"]) {
       const derived = daemonEnvironment(bind, entryDir);
       assert.equal(derived.VILI_DAEMON_HOST, "127.0.0.1");
