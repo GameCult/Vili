@@ -104,8 +104,7 @@ if (model === "hang-before-ready") {
         }
         if (model === "plant-link") {
           const outside = path.join(path.dirname(payload.output), "..", "outside.bvh");
-          writeFileSync(outside, "BVH-OUTSIDE
-");
+          writeFileSync(outside, "BVH-OUTSIDE\n");
           symlinkSync(outside, `${payload.output}.link`);
           symlinkSync(path.dirname(outside), `${payload.output}-linkdir`);
         }
