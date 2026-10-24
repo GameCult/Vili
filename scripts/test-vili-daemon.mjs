@@ -766,6 +766,29 @@ for (let trial = 1; trial <= 40; trial += 1) {
   });
 }
 
+// canonicalPath's fallback: a state root that does not exist yet is resolved through its longest existing prefix, so a
+// daemon naming it through a symlink and one naming it directly still contend for one lock.
+for (let trial = 1; trial <= 10; trial += 1) {
+  test(`two daemons naming a not-yet-existing root, one through a symlink, leave one owner (trial ${trial})`, async () => {
+    const real = mkdtempSync(path.join(os.tmpdir(), "vili-test-"));
+    const link = `${real}-link`;
+    symlinkSync(real, link);
+    const racers = await Promise.all([startDaemon({ root: real, nested: true, hold: false }), startDaemon({ root: link, nested: true, hold: false })]);
+    try {
+      await until(() => racers.every((racer) => racer.proc.exitCode !== null || /holds the state root/.test(racer.stdout())), "both racers to decide", 20);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const owners = racers.filter((racer) => racer.proc.exitCode === null);
+      assert.equal(owners.length, 1, "exactly one daemon stays up");
+      const loser = racers.find((racer) => racer !== owners[0]);
+      assert.equal(loser.proc.exitCode, 2);
+      assert.match(loser.stderr(), /held by a running daemon/);
+    } finally {
+      for (const racer of racers) if (racer.proc.exitCode === null && racer.proc.signalCode === null) racer.proc.kill("SIGKILL");
+      rmSync(link, { force: true });
+      rmSync(real, { recursive: true, force: true });
+    }
+  });
+}
 const idunnDaemon = async ({ leased = false, extraEnv = {}, loseWhenExists = null } = {}) => {
   const root = mkdtempSync(path.join(os.tmpdir(), "vili-test-"));
   const lease = path.join(root, "lease");
@@ -871,17 +894,18 @@ for (const noticed of [false, true]) {
 // earlier checks.
 const losses = [
   { when: "artifacts/*", absent: ["artifacts/*/meta.json", "logs", "embeddings"] },
+  { when: "artifacts/*", payload: { prompt: "a person waves", duration: 2, constraints: [{ type: "root2d" }] }, absent: ["artifacts/*/constraints.json", "artifacts/*/meta.json"] },
   { when: "artifacts/*/meta.json", absent: ["logs", "embeddings"] },
   { when: "logs", absent: ["embeddings"] },
   { when: "embeddings", absent: ["logs/worker.log"] },
   { when: "embeddings/stub-healthy", absent: ["artifacts/*/request.json", "jobs/*"] },
 ];
-for (const { when, absent } of losses) {
-  test(`a request is stopped at its next write when the lease goes at ${when}`, async () => {
+for (const { when, absent, payload } of losses) {
+  test(`a request is stopped at its next write when the lease goes at ${when}${payload ? " (constraints in the body)" : ""}`, async () => {
     const daemon = await idunnDaemon({ leased: true, loseWhenExists: when });
     try {
       await until(() => existsSync(path.join(daemon.stateRoot, "vili.service.cc")), "the service store", 10);
-      const answer = await generate(daemon);
+      const answer = await generate(daemon, payload);
       assert.equal(answer.status, 503);
       assert.equal(answer.body.code, "write-lease-lost");
       for (const gone of absent) {
