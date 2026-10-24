@@ -75,6 +75,17 @@ const viliDocumentRegistry = defineDocumentRegistry(
 
 const MAX_THREADS = 16;
 
+// The state root's one identity: symlinks resolved as far as the path exists. The hand-run lock's name, reclaim's
+// marker and the worker's environment all derive from args.stateRoot, so two spellings of one root are one root.
+function canonicalPath(target) {
+  try {
+    return realpathSync(target);
+  } catch {
+    const parent = path.dirname(target);
+    return parent === target ? target : path.join(canonicalPath(parent), path.basename(target));
+  }
+}
+
 function parseArgs(argv) {
   const env = process.env;
   const args = {
@@ -106,6 +117,7 @@ function parseArgs(argv) {
     process.exit(2);
   }
   args.threads = Number(args.threads);
+  args.stateRoot = canonicalPath(args.stateRoot);
   if (args.modelsRoot) args.modelsRoot = path.resolve(args.modelsRoot);
   return args;
 }
@@ -315,11 +327,11 @@ export function handRunRuntime(stateRoot) {
   const pidFile = path.join(stateRoot, "worker.pid");
   let lock = null;
 
-  // The lock is a listening socket in Linux's abstract namespace, named by the state root's real path. A bind is
+  // The lock is a listening socket in Linux's abstract namespace, named by the state root, which is canonical (its real path, see canonicalPath). A bind is
   // atomic and exclusive and the kernel drops it with its owner, so there is no lock file, no stale lock to probe
   // or take over, and no takeover to race: a bind either succeeds (this daemon owns the root) or it does not.
   const listen = () => new Promise((resolve, reject) => {
-    const name = createHash("sha256").update(realpathSync(stateRoot)).digest("hex");
+    const name = createHash("sha256").update(stateRoot).digest("hex");
     const server = net.createServer((socket) => socket.destroy());
     server.once("error", reject);
     server.listen(`\0vili-state-root:${name}`, () => {
@@ -395,11 +407,12 @@ export function handRunRuntime(stateRoot) {
   };
 }
 
-async function stopWorker() {
+// A requested stop gives the worker its grace (SIGTERM, then SIGKILL); a lost writer gets SIGKILL at once.
+async function stopWorker(signals = ["SIGTERM", "SIGKILL"]) {
   const proc = worker.proc;
   if (!proc || proc.pid === undefined) return;
   worker.state = "stopped";
-  for (const signal of ["SIGTERM", "SIGKILL"]) {
+  for (const signal of signals) {
     killGroup(proc.pid, signal);
     if (await waitForExit(proc, signal === "SIGTERM" ? 10000 : 5000)) break;
   }
@@ -467,7 +480,7 @@ async function startWorker(model, timeoutMs) {
         } catch {
           // not JSON: an ordinary log line
         }
-        if (runtime.held()) writeSync(sink, `${line}\n`);
+        if (mayWrite()) writeSync(sink, `${line}\n`);
       });
       lines.on("close", () => closeSync(sink));
     }),
@@ -516,7 +529,7 @@ async function generateMotion(request, response) {
     await generate(request, response);
   } catch (error) {
     if (!(error instanceof LeaseLost)) throw error;
-    json(response, 503, { ok: false, code: runtime.refusal() });
+    json(response, 503, { ok: false, code: stopping ? "stopping" : runtime.refusal() });
   }
 }
 
@@ -733,14 +746,26 @@ async function handleRequest(request, response) {
 }
 
 let runtime;
+let stopping = false;
 
 class LeaseLost extends Error {}
 
-// The one write gate. Every write to the state root and every spawn calls it, immediately before it happens (not once
-// per request), so a request admitted before the lease went still stops at its next write.
-function guard() {
-  if (!runtime.held()) throw new LeaseLost("the writer was lost");
+// The one write authority: the runtime holds the state root (the lease, or the lock) and the daemon is not stopping.
+// held() is read at the moment of every ask, so a loss is seen by the first gate to ask.
+function mayWrite() {
+  return !stopping && runtime.held();
 }
+
+// The one write gate. Every write to the state root and every spawn calls it, immediately before it happens (not once
+// per request), so a request admitted before the lease went, or before SIGTERM, still stops at its next write.
+function guard() {
+  if (!mayWrite()) throw new LeaseLost("the writer was lost");
+}
+
+// How often the lease is asked while nothing else asks, and so how long a worker can outlive a loss (plus the
+// SIGKILL): a generate can await its worker for 30 minutes. The service documents are rewritten every PERSIST_EVERY asks.
+const WATCH_MS = 250;
+const PERSIST_EVERY = 20;
 
 // The one daemon. `rt` owns the state root: the hand-run runtime (socket lock) or Idunn's (process write lease).
 // The server listens first, so Idunn's challenge can be answered while the lease is still pending; nothing is
@@ -758,12 +783,17 @@ export async function serve(rt) {
   await new Promise((resolve) => server.listen(args.port, args.host, resolve));
   console.log(`Vili listening on http://${args.host}:${server.address().port}`);
 
-  let surfaceTimer = null;
+  let tick = null;
+  // From the signal on nothing is accepted, written or spawned (guard() refuses what is already in flight); then the
+  // worker tree is stopped, and only then does the process end.
   const shutdown = async () => {
-    clearInterval(surfaceTimer);
+    if (stopping) return;
+    stopping = true;
+    server.close();
+    server.closeIdleConnections();
+    clearInterval(tick);
     await stopWorker();
     runtime.release();
-    server.close();
     process.exit(0);
   };
   process.on("SIGTERM", shutdown);
@@ -774,8 +804,8 @@ export async function serve(rt) {
   const onLost = () => {
     if (lost) return;
     lost = true;
-    clearInterval(surfaceTimer);
-    stopWorker().finally(() => runtime.reportHealth?.("degraded"));
+    clearInterval(tick);
+    stopWorker(["SIGKILL"]).finally(() => runtime.reportHealth?.("degraded"));
   };
   runtime.watch(onLost); // held() reports a loss through this the moment any gate sees it
   try {
@@ -786,13 +816,14 @@ export async function serve(rt) {
     if (error instanceof LeaseLost) return; // lost while opening the state root: onLost has run, and nothing is active
     throw error;
   }
-  surfaceTimer = setInterval(() => {
+  let asks = 0;
+  tick = setInterval(() => {
     runtime.watch(onLost);
-    if (lost) return;
+    if (lost || ++asks % PERSIST_EVERY !== 0) return;
     persistSurfaces().catch((error) => {
       if (!(error instanceof LeaseLost)) console.error(`persist failed: ${error?.name || "Error"}`);
     });
-  }, 5000);
+  }, WATCH_MS);
   if (lost) return;
   runtime.reportHealth?.("active");
   console.log("Vili holds the state root");
