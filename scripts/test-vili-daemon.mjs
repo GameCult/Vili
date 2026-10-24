@@ -2,7 +2,8 @@
 // Runs the real daemon against scripts/fixtures/stub-worker.mjs as its --python/--worker-entry.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
@@ -14,6 +15,8 @@ import { decode, encode } from "@msgpack/msgpack";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const daemonPath = path.join(here, "vili-daemon.mjs");
 const stubPath = path.join(here, "fixtures", "stub-worker.mjs");
+const stubBlenderPath = path.join(here, "fixtures", "stub-blender.mjs");
+const exportScriptPath = path.join(here, "bvh-to-fbx.py");
 const fakeIdunnEntry = path.join(here, "fixtures", "fake-idunn-entry.mjs");
 const THREADS = 5;
 
@@ -44,6 +47,7 @@ function isAlive(pid) {
 async function startDaemon({
   omit = [], viaEnv = false, threads = String(THREADS), python = process.execPath, nested = false, host = "127.0.0.1",
   relativeModels = false, extraArgs = [], root: givenRoot = null, entry = daemonPath, extraEnv = {}, hold = entry === daemonPath,
+  blender = "stub",
 } = {}) {
   const root = givenRoot ?? mkdtempSync(path.join(os.tmpdir(), "vili-test-"));
   const stateRoot = nested ? path.join(root, "a", "b", "state") : root;
@@ -59,6 +63,15 @@ async function startDaemon({
     "python-env": "test-env",
   };
   if (threads !== null) settings.threads = threads;
+  // Blender is a copy of the stub in a directory of its own (the stub logs its starts beside itself): "stub" is
+  // ready, "broken" fails its version probe, "missing" is a path with nothing there, null is unconfigured.
+  const blenderDir = mkdtempSync(path.join(os.tmpdir(), "vili-blender-"));
+  const blenderPath = blender === null ? null : path.join(blenderDir, { stub: "blender", broken: "blender-broken", missing: "absent" }[blender]);
+  if (blender === "stub" || blender === "broken") {
+    copyFileSync(stubBlenderPath, blenderPath);
+    chmodSync(blenderPath, 0o755);
+  }
+  if (blenderPath) settings.blender = blenderPath;
   for (const name of omit) delete settings[name];
   const env = { ...process.env, LEAK_CHECK: "leaked", LANG: "xx_TEST.UTF-8", ...extraEnv };
   for (const name of Object.keys(env)) if (name.startsWith("VILI_")) delete env[name];
@@ -80,10 +93,17 @@ async function startDaemon({
     const log = path.join(stateRoot, "embeddings", "stub-spawns.log");
     return existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : [];
   };
+  const startsLog = path.join(blenderDir, "starts.log");
+  const startLines = () => (existsSync(startsLog) ? readFileSync(startsLog, "utf8").split("\n").filter(Boolean) : []);
   return {
     root,
     stateRoot,
     modelsRoot,
+    blenderDir,
+    blenderPath,
+    // every start of the stub Blender, the version probe included
+    starts: () => startLines().filter((line) => line.startsWith("{")).map((line) => JSON.parse(line)),
+    blenderGrandchildren: () => startLines().filter((line) => line.startsWith("grandchild ")).map((line) => Number(line.split(" ")[1])),
     proc,
     boundHost: listening[1],
     port: Number(port),
@@ -101,6 +121,7 @@ async function startDaemon({
         // a daemon that did not stop on SIGTERM must not outlive the test and hold the run open
         if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
         rmSync(root, { recursive: true, force: true });
+        rmSync(blenderDir, { recursive: true, force: true });
       }
     },
   };
@@ -251,7 +272,7 @@ test("a job is a record on disk", async () => {
     const answer = await generate(daemon, { prompt: "a person waves", duration: 2, constraints: [{ type: "root2d" }] });
     assert.equal(answer.status, 200);
     const job = answer.body;
-    assert.equal(job.schema, "gamecult.vili.motion_job.v0");
+    assert.equal(job.schema, "gamecult.vili.motion_job.v1");
     assert.equal(job.request.schema, "gamecult.vili.motion_request.v0");
     assert.equal(job.prompt, "a person waves");
     assert.equal(job.model, "stub-model");
@@ -264,6 +285,14 @@ test("a job is a record on disk", async () => {
     assert.equal(job.worker.constraints, path.join(job.artifactDir, "constraints.json"));
     assert.deepEqual(JSON.parse(readFileSync(job.worker.constraints, "utf8")), [{ type: "root2d" }]);
     assert.deepEqual(JSON.parse(readFileSync(path.join(daemon.stateRoot, "jobs", `${job.jobId}.json`), "utf8")), job);
+    assert.ok(Number.isInteger(job.seed) && job.seed >= 0 && job.seed < 2 ** 31, "no seed was sent, so one was minted");
+    assert.deepEqual(job.files.map((file) => file.name), ["constraints.json", "meta.json", "request.json"]);
+    for (const file of job.files) {
+      const bytes = readFileSync(path.join(job.artifactDir, file.name));
+      assert.equal(file.bytes, bytes.length);
+      assert.equal(file.sha256, createHash("sha256").update(bytes).digest("hex"));
+    }
+    assert.equal(job.export, undefined, "a job that asked for no FBX has no export block");
     const batch = await generate(daemon, { texts: ["a", "b"], durations: [1, 1] });
     assert.equal(batch.status, 200);
     assert.equal(batch.body.prompt, null);
@@ -810,6 +839,7 @@ test("before the lease nothing is written, spawned or accepted", async () => {
     assert.equal(answer.status, 503);
     assert.equal(answer.body.code, "write-lease-pending");
     assert.deepEqual(daemon.spawns(), []);
+    assert.deepEqual(daemon.starts(), [], "no Blender before the lease, the version probe included");
     assert.equal(existsSync(daemon.stateRoot), false, "the state root must not exist before the lease");
     assert.deepEqual(daemon.health(), []);
   } finally {
@@ -1143,6 +1173,7 @@ test("the entry derives the daemon's host, port, interpreter and environment ide
       assert.equal(derived.VILI_DAEMON_PORT, "18861");
       assert.equal(derived.GAMECULT_IDUNN_CANDIDATE_BIND, "http://127.0.0.1:18861", "cultnet-ts compares the bind to the Expected route's endpoint, which carries the scheme Idunn's bare host:port lacks");
       assert.equal(derived.VILI_PYTHON, path.join(release, "python", "bin", "python3.12"));
+      assert.equal(derived.VILI_BLENDER, path.join(release, "blender", "blender"));
       assert.equal(derived.VILI_PYTHON_ENV, `locks-sha256:${createHash("sha256").update("build lock bytes\nruntime lock bytes\n").digest("hex")}`);
     }
   } finally {
@@ -1285,6 +1316,338 @@ test("a worker's output line after the first is not logged once the lease is gon
     const log = readFileSync(path.join(daemon.stateRoot, "logs", "worker.log"), "utf8");
     assert.ok(log.includes("stub-stdout-line"), "the first line was logged under the lease");
     assert.ok(!log.includes("after-healthy-line"), "a line after the loss must not be copied");
+  } finally {
+    await daemon.stop();
+  }
+});
+
+// ---- FBX export: the daemon converts each BVH the worker lists, through the sealed Blender, under the write gate.
+
+const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
+const exportRequest = (extra = {}) => ({ prompt: "a person waves", duration: 2, fbx: true, ...extra });
+const exportStarts = (daemon) => daemon.starts().filter((start) => start.argv.includes("--"));
+const jobFiles = (daemon) => readdirSync(path.join(daemon.stateRoot, "jobs"));
+const getArtifact = (daemon, urlPath) => request(daemon.port, "GET", urlPath);
+
+test("an fbx job exports every listed BVH", async () => {
+  const daemon = await startDaemon();
+  try {
+    assert.equal((await backendOf(daemon)).blender, "Blender 0.0.0 (stub)");
+    const answer = await generate(daemon, exportRequest({ clipName: "wave_01", seed: 7 }));
+    assert.equal(answer.status, 200);
+    const job = answer.body;
+    assert.equal(job.schema, "gamecult.vili.motion_job.v1");
+    assert.equal(job.ok, true);
+    assert.equal(job.worker.bvh, true, "fbx implies the BVH");
+    assert.equal(job.worker.bvhStandardTpose, true, "fbx implies the standard T-pose");
+    assert.equal(job.request.bvh, true);
+    assert.equal(job.request.bvhStandardTpose, true);
+    assert.deepEqual(job.export.clips, [{ file: "motion.fbx", clipName: "wave_01", bones: 78, frames: [1, 60], fps: 30 }]);
+    assert.equal(job.export.blender, "Blender 0.0.0 (stub)");
+    assert.equal(job.export.script, `sha256:${sha256(readFileSync(exportScriptPath))}`);
+    assert.equal(job.export.settings, "standard-tpose soma77 metres hashseed0 time1970");
+    const fbx = readFileSync(path.join(job.artifactDir, "motion.fbx"));
+    assert.equal(fbx.toString(), "FBX-STUB:BVH-STUB\n");
+    assert.deepEqual(job.files.map((file) => file.name), ["meta.json", "motion.bvh", "motion.fbx", "motion.npz", "request.json"]);
+    assert.equal(job.files.find((file) => file.name === "motion.fbx").sha256, sha256(fbx));
+    assert.equal(job.files.find((file) => file.name === "motion.fbx").bytes, fbx.length);
+    assert.deepEqual(JSON.parse(readFileSync(path.join(daemon.stateRoot, "jobs", `${job.jobId}.json`), "utf8")), job);
+    const request_ = JSON.parse(readFileSync(path.join(job.artifactDir, "request.json"), "utf8"));
+    assert.equal(request_.fbx, undefined, "the worker is told nothing of FBX");
+    assert.equal(request_.clipName, undefined);
+
+    const [probe, run] = daemon.starts();
+    assert.deepEqual(probe.argv, ["-b", "--factory-startup", "--version"]);
+    assert.deepEqual(run.argv, [
+      "-b", "--factory-startup", "--python-use-system-env", "--python-exit-code", "1", "--python", exportScriptPath,
+      "--", path.join(job.artifactDir, "motion.bvh"), path.join(job.artifactDir, "motion.fbx"), "wave_01",
+    ]);
+    assert.deepEqual(run.env, {
+      PATH: process.env.PATH,
+      LANG: "xx_TEST.UTF-8",
+      HOME: "/nonexistent",
+      PYTHONHASHSEED: "0",
+      PYTHONNOUSERSITE: "1",
+      LD_LIBRARY_PATH: path.join(daemon.blenderDir, "lib"),
+    }, "the export environment is these six and nothing else (no VILI_*, no LEAK_CHECK)");
+    assert.equal(run.priority, 10);
+    assert.equal(run.pgid, run.pid, "Blender leads its own process group");
+    const log = readFileSync(path.join(daemon.stateRoot, "logs", "export.log"), "utf8");
+    assert.match(log, /stub-blender-stderr wave_01/);
+
+    const named = await generate(daemon, exportRequest());
+    assert.equal(named.body.export.clips[0].clipName, named.body.jobId, "the clip is named after the job by default");
+    const several = await generate(daemon, exportRequest({ clipName: "pair", numSamples: 2 }));
+    assert.equal(several.status, 200);
+    assert.deepEqual(several.body.export.clips.map((clip) => [clip.file, clip.clipName]), [
+      ["motion/motion_00.fbx", "pair_00"],
+      ["motion/motion_01.fbx", "pair_01"],
+    ]);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("fbx refusals happen before anything is written or spawned", async () => {
+  const daemon = await startDaemon();
+  try {
+    for (const bad of [
+      { bvhStandardTpose: false },
+      { bvh_standard_tpose: "false" },
+      { clipName: "a b canary" },
+      { clipName: "x".repeat(65) },
+      { clipName: "" },
+      { clipName: 5 },
+    ]) {
+      const answer = await generate(daemon, exportRequest(bad));
+      assert.equal(answer.status, 400, JSON.stringify(bad));
+      assert.ok(!answer.raw.includes("canary"), "the refusal repeated the input");
+    }
+    assert.equal(existsSync(path.join(daemon.stateRoot, "artifacts")), false, "no artifact directory was made");
+    assert.deepEqual(jobFiles(daemon), []);
+    assert.deepEqual(daemon.spawns(), [], "no worker was started");
+    assert.equal(exportStarts(daemon).length, 0);
+    assert.equal((await generate(daemon, exportRequest({ clipName: "x".repeat(64) }))).status, 200, "64 characters is the limit");
+  } finally {
+    await daemon.stop();
+  }
+  for (const blender of [null, "broken", "missing"]) {
+    const unready = await startDaemon({ blender });
+    try {
+      assert.equal((await backendOf(unready)).blender, blender === null ? "unconfigured" : "unavailable");
+      const answer = await generate(unready, exportRequest());
+      assert.equal(answer.status, 503);
+      assert.equal(answer.body.code, "blender-unavailable");
+      assert.deepEqual(unready.spawns(), [], "no worker was started");
+      assert.equal(existsSync(path.join(unready.stateRoot, "artifacts")), false, "no artifact directory was made");
+      assert.deepEqual(jobFiles(unready), []);
+      assert.equal(exportStarts(unready).length, 0);
+      assert.equal((await generate(unready)).status, 200, "a job that asks for no FBX needs no Blender");
+    } finally {
+      await unready.stop();
+    }
+  }
+});
+
+test("the BVH is never given to Blender unless it is a regular file inside the job's directory", async () => {
+  const daemon = await startDaemon();
+  try {
+    for (const model of ["bvh-outside", "bvh-link"]) {
+      const answer = await generate(daemon, exportRequest({ model, clipName: "canary_clip" }));
+      assert.equal(answer.status, 502, model);
+      assert.equal(answer.body.ok, false);
+      assert.equal(answer.body.error, "fbx-export-refused");
+      assert.equal(answer.body.export.clips.length, 0);
+      assert.ok(existsSync(path.join(daemon.stateRoot, "jobs", `${answer.body.jobId}.json`)), "the failed job is still a record");
+    }
+    assert.equal(exportStarts(daemon).length, 0, "Blender was never started for either");
+    assert.ok(!(daemon.stdout() + daemon.stderr()).includes("canary"));
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("a failing or hung Blender fails the job, leaks nothing, and leaves nothing running", async () => {
+  const daemon = await startDaemon();
+  try {
+    const failed = await generate(daemon, exportRequest({ clipName: "fail_canary" }));
+    assert.equal(failed.status, 502);
+    assert.equal(failed.body.ok, false);
+    assert.equal(failed.body.error, "fbx-export-failed (exit 1)");
+    assert.ok(!failed.raw.includes("stub-blender-stderr"), "Blender's output is not in the answer");
+    assert.ok(!failed.body.error.includes("canary") && !(daemon.stdout() + daemon.stderr()).includes("canary"));
+    assert.match(readFileSync(path.join(daemon.stateRoot, "logs", "export.log"), "utf8"), /stub-blender-stderr fail_canary/);
+    assert.ok(existsSync(path.join(daemon.stateRoot, "jobs", `${failed.body.jobId}.json`)));
+
+    const silent = await generate(daemon, exportRequest({ clipName: "silent" }));
+    assert.equal(silent.body.error, "fbx-export-failed (no result)");
+
+    const before = daemon.starts().length;
+    const hung = await generate(daemon, exportRequest({ clipName: "hang", exportTimeoutMs: 700 }));
+    assert.equal(hung.status, 502);
+    assert.equal(hung.body.error, "fbx-export-failed (signal SIGKILL)");
+    const [run] = daemon.starts().slice(before);
+    await until(() => daemon.blenderGrandchildren().length === 1, "the hung Blender's grandchild");
+    await until(() => !isAlive(run.pid) && !isAlive(daemon.blenderGrandchildren()[0]), "the hung export's group to be dead");
+    assert.equal(hung.body.files.some((file) => file.name.endsWith(".fbx")), false);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("SIGTERM during an export stops its group, writes nothing more, and exits 0", async () => {
+  const daemon = await startDaemon();
+  try {
+    const pending = generate(daemon, exportRequest({ clipName: "slow" }));
+    pending.catch(() => {});
+    const run = await until(() => exportStarts(daemon)[0], "the export to start");
+    daemon.proc.kill("SIGTERM");
+    await until(() => !isAlive(run.pid), "the export to be stopped", 5);
+    await until(() => daemon.proc.exitCode !== null, "the daemon to exit");
+    assert.equal(daemon.proc.exitCode, 0);
+    assert.deepEqual(jobFiles(daemon), [], "no record after the signal");
+    const [artifacts] = [path.join(daemon.stateRoot, "artifacts")];
+    for (const job of readdirSync(artifacts)) assert.equal(existsSync(path.join(artifacts, job, "motion.fbx")), false);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("losing the lease kills a running export within a second and records nothing", async () => {
+  const daemon = await idunnDaemon({ leased: true });
+  try {
+    await until(() => existsSync(path.join(daemon.stateRoot, "vili.service.cc")), "the service store", 10);
+    assert.equal(daemon.starts().length, 1, "the version probe ran once the lease was held");
+    const pending = generate(daemon, exportRequest({ clipName: "slow" }));
+    const run = await until(() => exportStarts(daemon)[0], "the export to start");
+    rmSync(daemon.lease);
+    const lost = Date.now();
+    await until(() => !isAlive(run.pid), "the export to be dead", 2);
+    assert.ok(Date.now() - lost < 1500, "the export outlived the lease by more than a second");
+    assert.equal((await pending).status, 503);
+    assert.deepEqual(jobFiles(daemon), []);
+    assert.equal(existsSync(path.join(daemon.stateRoot, "artifacts", readdirSync(path.join(daemon.stateRoot, "artifacts"))[0], "motion.fbx")), false);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("the seed is minted when absent and recorded for every job", async () => {
+  const daemon = await startDaemon();
+  try {
+    for (const extra of [{}, { fbx: false }]) {
+      const job = (await generate(daemon, exportRequest(extra))).body;
+      assert.ok(Number.isInteger(job.seed) && job.seed >= 0 && job.seed < 2 ** 31);
+      assert.equal(job.request.seed, job.seed);
+      assert.equal(job.worker.seed, job.seed, "the worker was given the minted seed");
+      assert.equal(job.worker.metaSeed, job.seed);
+      assert.equal(JSON.parse(readFileSync(path.join(job.artifactDir, "meta.json"), "utf8")).seed, job.seed);
+    }
+    const given = (await generate(daemon, exportRequest({ seed: 7 }))).body;
+    assert.equal(given.seed, 7);
+    assert.equal(given.worker.seed, 7);
+    assert.equal(given.worker.metaSeed, 7);
+    assert.equal(JSON.parse(readFileSync(path.join(given.artifactDir, "meta.json"), "utf8")).seed, 7);
+    const zero = (await generate(daemon, exportRequest({ seed: 0 }))).body;
+    assert.equal(zero.seed, 0, "0 is a seed");
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("the artifact read route serves only a job's own FBX and BVH files", async () => {
+  const daemon = await startDaemon();
+  try {
+    const job = (await generate(daemon, exportRequest({ clipName: "walk", numSamples: 1 }))).body;
+    const base = `/motion/artifacts/${job.jobId}`;
+    const served = await getArtifact(daemon, `${base}/motion.fbx`);
+    assert.equal(served.status, 200);
+    assert.equal(served.headers["content-type"], "application/octet-stream");
+    assert.equal(served.raw, "FBX-STUB:BVH-STUB\n");
+    assert.equal((await getArtifact(daemon, `${base}/motion.bvh`)).raw, "BVH-STUB\n");
+
+    const refused = [
+      `${base}/meta.json`,
+      `${base}/request.json`,
+      `${base}/motion.npz`,
+      `${base}/..%2fmeta.json`,
+      `${base}/%2e%2e/${job.jobId}/meta.json`,
+      `${base}/../../jobs/${job.jobId}.json`,
+      `${base}/motion/motion_00.fbx`,
+      `/motion/artifacts/vili-123/motion.fbx`,
+      `/motion/artifacts/vili-canary-canary/motion.fbx`,
+      `/motion/artifacts/vili-9999999999999/motion.fbx`,
+      `/motion/artifacts/${job.jobId}`,
+      `/motion/artifacts/${job.jobId}/`,
+    ];
+    for (const url of refused) {
+      const answer = await getArtifact(daemon, url);
+      assert.equal(answer.status, 404, url);
+      assert.equal(answer.raw, "not found\n", "a refusal echoes nothing");
+    }
+    assert.equal((await request(daemon.port, "POST", `${base}/motion.fbx`, { body: "{}", headers: { "content-type": "application/json" } })).status, 404);
+
+    // a symlink planted in the artifact directory, as the file or as a directory above it, is never followed
+    const outside = path.join(daemon.root, "outside.bin");
+    writeFileSync(outside, "SECRET");
+    rmSync(path.join(job.artifactDir, "motion.bvh"));
+    symlinkSync(outside, path.join(job.artifactDir, "motion.bvh"));
+    assert.equal((await getArtifact(daemon, `${base}/motion.bvh`)).status, 404);
+    mkdirSync(path.join(daemon.root, "elsewhere"));
+    writeFileSync(path.join(daemon.root, "elsewhere", "motion_00.fbx"), "SECRET");
+    symlinkSync(path.join(daemon.root, "elsewhere"), path.join(job.artifactDir, "motion"));
+    const through = await getArtifact(daemon, `${base}/motion/motion_00.fbx`);
+    assert.equal(through.status, 404);
+    assert.ok(!through.raw.includes("SECRET"));
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("rest-fbx is a job whose FBX is readable", async () => {
+  const pyRoot = mkdtempSync(path.join(os.tmpdir(), "vili-py-"));
+  const python = path.join(pyRoot, "bin", "python3.12");
+  mkdirSync(path.dirname(python), { recursive: true });
+  symlinkSync(process.execPath, python);
+  const skeletons = path.join(pyRoot, "lib", "python3.12", "site-packages", "kimodo", "assets", "skeletons", "somaskel77");
+  mkdirSync(skeletons, { recursive: true });
+  writeFileSync(path.join(skeletons, "somaskel77_standard_tpose.bvh"), "REST-BVH\n");
+  const daemon = await startDaemon({ python });
+  try {
+    const answer = await request(daemon.port, "POST", "/motion/rest-fbx", { body: "{}", headers: { "content-type": "application/json" } });
+    assert.equal(answer.status, 200);
+    const job = answer.body;
+    assert.match(job.jobId, /^rest-[0-9]{13}$/);
+    assert.equal(job.schema, "gamecult.vili.motion_job.v1");
+    assert.deepEqual(job.export.clips, [{ file: "SOMA77_Rest.fbx", clipName: "SOMA77_Rest", bones: 78, frames: [1, 60], fps: 30 }]);
+    assert.deepEqual(job.files.map((file) => file.name), ["SOMA77_Rest.bvh", "SOMA77_Rest.fbx"]);
+    assert.deepEqual(JSON.parse(readFileSync(path.join(daemon.stateRoot, "jobs", `${job.jobId}.json`), "utf8")), job);
+    const served = await getArtifact(daemon, `/motion/artifacts/${job.jobId}/SOMA77_Rest.fbx`);
+    assert.equal(served.status, 200);
+    assert.equal(served.raw, "FBX-STUB:REST-BVH\n");
+    assert.deepEqual(daemon.spawns(), [], "no worker is needed for a rest pose");
+    const cross = await request(daemon.port, "POST", "/motion/rest-fbx", { body: "{}", headers: { "content-type": "text/plain" } });
+    assert.equal(cross.status, 403);
+  } finally {
+    await daemon.stop();
+    rmSync(pyRoot, { recursive: true, force: true });
+  }
+
+  const bare = await startDaemon();
+  try {
+    const missing = await request(bare.port, "POST", "/motion/rest-fbx", { body: "{}", headers: { "content-type": "application/json" } });
+    assert.equal(missing.status, 503);
+    assert.equal(missing.body.code, "rest-skeleton-missing");
+  } finally {
+    await bare.stop();
+  }
+  const unready = await startDaemon({ blender: null });
+  try {
+    const refused = await request(unready.port, "POST", "/motion/rest-fbx", { body: "{}", headers: { "content-type": "application/json" } });
+    assert.equal(refused.status, 503);
+    assert.equal(refused.body.code, "blender-unavailable");
+    assert.equal(existsSync(path.join(unready.stateRoot, "artifacts")), false);
+  } finally {
+    await unready.stop();
+  }
+  const waiting = await idunnDaemon();
+  try {
+    const early = await request(waiting.port, "POST", "/motion/rest-fbx", { body: "{}", headers: { "content-type": "application/json" } });
+    assert.equal(early.status, 503);
+    assert.equal(early.body.code, "write-lease-pending");
+    assert.deepEqual(waiting.starts(), []);
+  } finally {
+    await waiting.stop();
+  }
+});
+
+test("operator state and the command boundary name the export", async () => {
+  const daemon = await startDaemon();
+  try {
+    const state = await operatorState(daemon);
+    assert.equal(state.routes.artifacts, "/motion/artifacts/{jobId}/{name}");
+    assert.equal(state.routes.restFbx, "/motion/rest-fbx");
+    assert.ok(state.authority.owns.includes("clip export to FBX"));
   } finally {
     await daemon.stop();
   }

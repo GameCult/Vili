@@ -1,12 +1,12 @@
 // Stands in for kimodo-resident-worker.py in the daemon's tests. It binds port 0, prints the ready line the
 // daemon waits for, and answers /health and /generate with what the daemon gave it. The --model value picks a
 // misbehaviour: crash-before-ready, hang-before-ready, sick, slow-health, stubborn, fail-generate,
-// refuse-generate, drop-generate, slow-generate, writer (appends to <output>.writes every 50 ms, never answers, ignores SIGTERM), slow-to-stop (no answer; prints a line and exits 1.5 s after SIGTERM), chatty (prints a line the moment it is healthy), encoder (a grandchild, then no answer), graceful (exits 0.5 s after SIGTERM), die-after-ready. Any other value is just the model the worker serves.
+// refuse-generate, drop-generate, slow-generate, writer (appends to <output>.writes every 50 ms, never answers, ignores SIGTERM), slow-to-stop (no answer; prints a line and exits 1.5 s after SIGTERM), chatty (prints a line the moment it is healthy), encoder (a grandchild, then no answer), graceful (exits 0.5 s after SIGTERM), die-after-ready, bvh-outside (lists a BVH outside the job's directory), bvh-link (lists a symlink as its BVH). A request with bvh writes <output>.bvh (motion/motion_NN.bvh for several samples) and lists it. Any other value is just the model the worker serves.
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 
 const argv = process.argv.slice(2);
 const flag = (name) => {
@@ -81,8 +81,33 @@ if (model === "hang-before-ready") {
           spawn(process.execPath, ["-e", `process.on('SIGTERM', () => {}); require('fs').appendFileSync(${JSON.stringify(spawnLog)}, 'grandchild ' + process.pid + '\\n'); setInterval(() => {}, 1000)`], { stdio: "ignore" });
           return;
         }
+        let files;
+        if (payload.bvh) {
+          const outside = path.join(path.dirname(payload.output), "..", "outside.bvh");
+          if (model === "bvh-outside") {
+            writeFileSync(outside, "BVH-OUTSIDE\n");
+            files = [outside];
+          } else if (model === "bvh-link") {
+            writeFileSync(outside, "BVH-OUTSIDE\n");
+            symlinkSync(outside, `${payload.output}.bvh`);
+            files = [`${payload.output}.bvh`];
+          } else if (payload.numSamples > 1) {
+            mkdirSync(payload.output, { recursive: true });
+            files = Array.from({ length: payload.numSamples }, (_, index) => path.join(payload.output, `motion_${String(index).padStart(2, "0")}.bvh`));
+            for (const [index, file] of files.entries()) writeFileSync(file, `BVH-STUB sample ${index}\n`);
+          } else {
+            writeFileSync(`${payload.output}.npz`, "NPZ-STUB\n");
+            writeFileSync(`${payload.output}.bvh`, "BVH-STUB\n");
+            files = [`${payload.output}.npz`, `${payload.output}.bvh`];
+          }
+        }
         send(200, {
           ok: true,
+          files,
+          seed: payload.seed,
+          metaSeed: payload.meta?.seed,
+          bvh: payload.bvh,
+          bvhStandardTpose: payload.bvhStandardTpose,
           model: model || "stub-model",
           pid: process.pid,
           requests,
