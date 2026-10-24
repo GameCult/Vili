@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import http from "node:http";
 import os from "node:os";
-import { closeSync, openSync, readdirSync, readFileSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { closeSync, openSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline";
@@ -244,13 +245,17 @@ function transportProfile() {
 }
 
 async function persistSurfaces() {
+  guard();
   await mkdir(args.stateRoot, { recursive: true });
   const cache = CultCache.builder()
     .withRegistry(viliDocumentRegistry)
     .withGenericStore(new SingleFileMessagePackBackingStore(path.join(args.stateRoot, viliStoreFileName)))
     .build();
+  guard();
   await cache.put(operatorStateDefinition, "vili", operatorState());
+  guard();
   await cache.put(commandBoundaryDefinition, "vili", commandBoundary());
+  guard();
   await cache.put(transportProfileDefinition, "vili", transportProfile());
 }
 
@@ -307,24 +312,21 @@ function killGroup(pgid, signal) {
 // The hand-run way of owning a state root (tests, development): a Unix socket lock, the worker's pid file and the
 // /proc reclaim. Idunn's runtime (scripts/idunn-entry.mjs) replaces all three with its process write lease.
 export function handRunRuntime(stateRoot) {
-  const lockPath = path.join(stateRoot, "daemon.lock");
   const pidFile = path.join(stateRoot, "worker.pid");
   let lock = null;
 
+  // The lock is a listening socket in Linux's abstract namespace, named by the state root's real path. A bind is
+  // atomic and exclusive and the kernel drops it with its owner, so there is no lock file, no stale lock to probe
+  // or take over, and no takeover to race: a bind either succeeds (this daemon owns the root) or it does not.
   const listen = () => new Promise((resolve, reject) => {
+    const name = createHash("sha256").update(realpathSync(stateRoot)).digest("hex");
     const server = net.createServer((socket) => socket.destroy());
     server.once("error", reject);
-    server.listen(lockPath, () => {
+    server.listen(`\0vili-state-root:${name}`, () => {
       server.removeListener("error", reject);
       lock = server;
       resolve();
     });
-  });
-
-  const probe = () => new Promise((resolve) => {
-    const socket = net.connect(lockPath);
-    socket.once("connect", () => { socket.destroy(); resolve("live"); });
-    socket.once("error", () => resolve("stale"));
   });
 
   // A worker left by a crashed daemon: the pid file names its group, and the group is ours only if some member
@@ -368,12 +370,8 @@ export function handRunRuntime(stateRoot) {
         await listen();
       } catch (error) {
         if (error?.code !== "EADDRINUSE") throw error;
-        if ((await probe()) === "live") {
-          console.error("the state root is held by a running daemon");
-          process.exit(2);
-        }
-        unlinkSync(lockPath);
-        await listen();
+        console.error("the state root is held by a running daemon");
+        process.exit(2);
       }
       reclaimStrayWorker(); // synchronous: no request is served before a predecessor's worker is gone
     },
@@ -393,11 +391,6 @@ export function handRunRuntime(stateRoot) {
     release() {
       if (lock) lock.close();
       lock = null;
-      try {
-        unlinkSync(lockPath);
-      } catch {
-        // already gone
-      }
     },
   };
 }
@@ -413,8 +406,11 @@ async function stopWorker() {
 }
 
 async function startWorker(model, timeoutMs) {
+  guard();
   await mkdir(path.join(args.stateRoot, "logs"), { recursive: true });
+  guard();
   await mkdir(path.join(args.stateRoot, "embeddings"), { recursive: true });
+  guard(); // synchronous with the log open and the spawn below: no await between them
   const logFd = openSync(path.join(args.stateRoot, "logs", "worker.log"), "a");
   const argv = [args.workerEntry, "--host", "127.0.0.1", "--port", "0"];
   if (model) argv.push("--model", model);
@@ -471,7 +467,7 @@ async function startWorker(model, timeoutMs) {
         } catch {
           // not JSON: an ordinary log line
         }
-        writeSync(sink, `${line}\n`);
+        if (runtime.held()) writeSync(sink, `${line}\n`);
       });
       lines.on("close", () => closeSync(sink));
     }),
@@ -516,10 +512,16 @@ async function readRequestBody(request) {
 }
 
 async function generateMotion(request, response) {
-  if (!runtime.held()) {
+  try {
+    await generate(request, response);
+  } catch (error) {
+    if (!(error instanceof LeaseLost)) throw error;
     json(response, 503, { ok: false, code: runtime.refusal() });
-    return;
   }
+}
+
+async function generate(request, response) {
+  guard();
   if (workerUnconfigured()) {
     json(response, 503, { ok: false, code: "worker-unconfigured" });
     return;
@@ -549,6 +551,7 @@ async function generateMotion(request, response) {
 
   const jobId = `vili-${Date.now()}`;
   const artifactDir = path.join(args.stateRoot, "artifacts", jobId);
+  guard();
   await mkdir(artifactDir, { recursive: true });
   const duration = firstDefined(body.durationSeconds, body.duration, 4);
   const bodyMeta = typeof body.meta === "object" && body.meta ? body.meta : {};
@@ -585,6 +588,7 @@ async function generateMotion(request, response) {
     return undefined;
   })();
   if (body.constraints !== undefined && typeof body.constraints !== "string") {
+    guard();
     await writeFile(path.join(artifactDir, "constraints.json"), JSON.stringify(body.constraints, null, 2));
   }
   const requestRecord = {
@@ -608,6 +612,7 @@ async function generateMotion(request, response) {
     saveExampleDir: boolValue(firstDefined(body.saveExampleDir, body.save_example_dir)),
     inputFolder: firstDefined(body.inputFolder, body.input_folder),
   };
+  guard();
   await writeFile(path.join(artifactDir, "meta.json"), JSON.stringify(meta, null, 2));
 
   let result;
@@ -637,6 +642,7 @@ async function generateMotion(request, response) {
       saveExampleDir: boolValue(firstDefined(body.saveExampleDir, body.save_example_dir)),
       output: path.join(artifactDir, "motion"),
     };
+    guard();
     await writeFile(path.join(artifactDir, "request.json"), JSON.stringify(workerRequest, null, 2));
     const answer = await fetch(`http://127.0.0.1:${worker.port}/generate`, {
       method: "POST",
@@ -647,14 +653,11 @@ async function generateMotion(request, response) {
     const workerBody = await answer.json();
     result = { ok: answer.ok && workerBody?.ok !== false, error: answer.ok ? null : `the worker answered ${answer.status}`, body: workerBody };
   } catch (error) {
+    if (error instanceof LeaseLost) throw error;
     result = { ok: false, error: `the worker request failed (${error?.name || "Error"})`, body: null };
   }
 
-  if (!runtime.held()) {
-    // the writer was lost while the job ran: nothing more is written
-    json(response, 503, { ok: false, code: runtime.refusal() });
-    return;
-  }
+  guard(); // the writer may have been lost while the job ran
   const job = {
     schema: "gamecult.vili.motion_job.v0",
     jobId,
@@ -731,6 +734,14 @@ async function handleRequest(request, response) {
 
 let runtime;
 
+class LeaseLost extends Error {}
+
+// The one write gate. Every write to the state root and every spawn calls it, immediately before it happens (not once
+// per request), so a request admitted before the lease went still stops at its next write.
+function guard() {
+  if (!runtime.held()) throw new LeaseLost("the writer was lost");
+}
+
 // The one daemon. `rt` owns the state root: the hand-run runtime (socket lock) or Idunn's (process write lease).
 // The server listens first, so Idunn's challenge can be answered while the lease is still pending; nothing is
 // written to the state root until the runtime holds it.
@@ -759,8 +770,6 @@ export async function serve(rt) {
   process.on("SIGINT", shutdown);
 
   await runtime.acquire();
-  await mkdir(path.join(args.stateRoot, "jobs"), { recursive: true });
-  await persistSurfaces();
   let lost = false;
   const onLost = () => {
     if (lost) return;
@@ -768,10 +777,16 @@ export async function serve(rt) {
     clearInterval(surfaceTimer);
     stopWorker().finally(() => runtime.reportHealth?.("degraded"));
   };
+  runtime.watch(onLost); // held() reports a loss through this the moment any gate sees it
+  guard();
+  await mkdir(path.join(args.stateRoot, "jobs"), { recursive: true });
+  await persistSurfaces();
   surfaceTimer = setInterval(() => {
     runtime.watch(onLost);
     if (lost) return;
-    persistSurfaces().catch((error) => console.error(`persist failed: ${error?.name || "Error"}`));
+    persistSurfaces().catch((error) => {
+      if (!(error instanceof LeaseLost)) console.error(`persist failed: ${error?.name || "Error"}`);
+    });
   }, 5000);
   runtime.reportHealth?.("active");
   console.log("Vili holds the state root");

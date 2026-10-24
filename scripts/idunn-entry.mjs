@@ -25,6 +25,21 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 export function idunnRuntime(signer, { pollMs = LEASE_POLL_MS } = {}) {
   let held = false;
   let lost = false;
+  let onLost = () => {};
+
+  // The lease is read at the moment of every question, not once per tick: a loss is seen by the first gate to ask.
+  const check = () => {
+    if (!held) return false;
+    try {
+      signer.assertWriteLease();
+      return true;
+    } catch {
+      held = false;
+      lost = true;
+      onLost();
+      return false;
+    }
+  };
 
   return {
     async acquire() {
@@ -39,17 +54,11 @@ export function idunnRuntime(signer, { pollMs = LEASE_POLL_MS } = {}) {
         await delay(pollMs);
       }
     },
-    held: () => held,
+    held: check,
     refusal: () => (lost ? "write-lease-lost" : "write-lease-pending"),
-    watch(onLost) {
-      if (!held) return;
-      try {
-        signer.assertWriteLease();
-      } catch {
-        held = false;
-        lost = true;
-        onLost();
-      }
+    watch(handler) {
+      onLost = handler;
+      check();
     },
     recordWorker() {},
     forgetWorker() {},
