@@ -104,7 +104,7 @@ function parseEntryArgs(argv) {
 }
 
 // What the daemon reads from its environment, derived from Idunn's bind and the sealed release's own layout:
-// the interpreter sits beside the vili tree, and the environment's identity is the hash of the two lock files.
+// the interpreter and Blender sit beside the vili tree, and the environment's identity is the hash of the two lock files.
 export function daemonEnvironment(bind, entryDir) {
   const { host, port } = splitBind(bind);
   const locks = ["requirements-build.lock", "requirements.lock"].map((name) =>
@@ -115,6 +115,7 @@ export function daemonEnvironment(bind, entryDir) {
     VILI_DAEMON_HOST: host,
     VILI_DAEMON_PORT: port,
     VILI_PYTHON: path.resolve(entryDir, "..", "..", "python", "bin", "python3.12"),
+    VILI_BLENDER: path.resolve(entryDir, "..", "..", "blender", "blender"),
     VILI_PYTHON_ENV: `locks-sha256:${createHash("sha256").update(Buffer.concat(locks)).digest("hex")}`,
   };
 }
