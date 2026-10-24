@@ -1531,7 +1531,8 @@ test("losing the lease kills a running export within a second and records nothin
   const daemon = await idunnDaemon({ leased: true });
   try {
     await until(() => existsSync(path.join(daemon.stateRoot, "vili.service.cc")), "the service store", 10);
-    await until(() => daemon.starts().length === 1, "the version probe, run once the lease was held");
+    await until(async () => (await backendOf(daemon)).blender === "Blender 0.0.0 (stub)", "the version probe, run once the lease was held");
+    assert.equal(daemon.starts().length, 1);
     assert.equal(existsSync(path.join(daemon.stateRoot, "logs")), false, "the probe writes nothing to the state root");
     const pending = generate(daemon, exportRequest({ clipName: "slow" }));
     const ended = pending.then((answer) => { throw new Error(`the job ended before its export started: ${answer.status} ${answer.raw.slice(0, 300)}`); });
