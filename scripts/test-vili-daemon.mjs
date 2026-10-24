@@ -1459,8 +1459,17 @@ test("a failing or hung Blender fails the job, leaks nothing, and leaves nothing
     assert.match(readFileSync(path.join(daemon.stateRoot, "logs", "export.log"), "utf8"), /stub-blender-stderr fail_canary/);
     assert.ok(existsSync(path.join(daemon.stateRoot, "jobs", `${failed.body.jobId}.json`)));
 
-    const silent = await generate(daemon, exportRequest({ clipName: "silent" }));
-    assert.equal(silent.body.error, "fbx-export-failed (no result)");
+    for (const clip of ["silent", "garbage", "nofile"]) {
+      const odd = await generate(daemon, exportRequest({ clipName: clip }));
+      assert.equal(odd.status, 502, clip);
+      assert.equal(odd.body.error, "fbx-export-failed (no result)", clip);
+    }
+
+    const known = new Set(daemon.blenderGrandchildren());
+    const orphaned = await generate(daemon, exportRequest({ clipName: "orphan" }));
+    assert.equal(orphaned.status, 200, "an export that exits 0 is a good export");
+    const left = await until(() => daemon.blenderGrandchildren().filter((pid) => !known.has(pid))[0], "the orphan's grandchild");
+    await until(() => !isAlive(left), "what Blender left running to be killed with its group");
 
     const before = daemon.starts().length;
     const hung = await generate(daemon, exportRequest({ clipName: "hang", exportTimeoutMs: 2500 }));

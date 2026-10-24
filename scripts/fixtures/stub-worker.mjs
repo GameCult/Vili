@@ -95,6 +95,7 @@ if (model === "hang-before-ready") {
             mkdirSync(payload.output, { recursive: true });
             files = Array.from({ length: payload.numSamples }, (_, index) => path.join(payload.output, `motion_${String(index).padStart(2, "0")}.bvh`));
             for (const [index, file] of files.entries()) writeFileSync(file, `BVH-STUB sample ${index}\n`);
+            files.reverse(); // the worker's listing order is not the daemon's clip order
           } else {
             writeFileSync(`${payload.output}.npz`, "NPZ-STUB\n");
             writeFileSync(`${payload.output}.bvh`, "BVH-STUB\n");

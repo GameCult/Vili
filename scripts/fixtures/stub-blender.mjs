@@ -1,11 +1,14 @@
 #!/usr/bin/env node
-// Stands in for Blender in the daemon's tests. Every start appends a JSON line {pid, pgid, priority, argv, env} to starts.log beside
-// this file (the test gives each daemon its own copy, so the log is per test). `--version` answers like Blender,
-// unless the copy is named blender-broken. An export (`... -- <bvh> <fbx> <clip>`) acts on the clip name:
-//   fail*   prints a line to stderr, exits 1          silent*  exits 0 with no result line
-//   hang*   a grandchild, then never exits            slow*    runs 6 s, then behaves
-//   other   writes "FBX-STUB:" + the BVH's bytes to <fbx> and prints the VILI-FBX result line
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+// Stands in for Blender in the daemon's tests. Every start appends a JSON line {pid, pgid, priority, argv, env} to
+// starts.log beside this file (the test gives each daemon its own copy, so the log is per test). `--version` answers
+// like Blender, unless the copy is named blender-broken, which names itself and exits 1. An export
+// (`... -- <bvh> <fbx> <clip>`) acts on the clip name:
+//   fail*     prints a line to stderr, exits 1        silent*   exits 0 with no result line
+//   garbage*  exits 0 with a malformed result line    nofile*   exits 0 with a result line and no FBX
+//   hang*     a grandchild, then never exits          slow*     runs 6 s, then behaves
+//   orphan*   behaves, but leaves a grandchild running when it exits
+//   other     writes "FBX-STUB:" + the BVH's bytes to <fbx> and prints the VILI-FBX result line
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -17,22 +20,38 @@ const pgid = Number(readFileSync("/proc/self/stat", "utf8").split(") ")[1].split
 appendFileSync(log, `${JSON.stringify({ pid: process.pid, pgid, priority: os.getPriority(), argv, env: process.env })}\n`);
 
 if (argv.includes("--version")) {
-  if (path.basename(process.argv[1]).includes("broken")) process.exit(1);
   console.log("Blender 0.0.0 (stub)");
   console.log("\tbuild date: never");
-  process.exit(0);
+  process.exit(path.basename(process.argv[1]).includes("broken") ? 1 : 0);
 }
+
+const result = `VILI-FBX ${JSON.stringify({ bones: 78, frames: [1, 60], fps: 30 })}`;
+const grandchildren = () => (existsSync(log) ? readFileSync(log, "utf8").split("\n").filter((line) => line.startsWith("grandchild ")).length : 0);
+const spawnGrandchild = () => spawn(process.execPath, ["-e", `require('fs').appendFileSync(${JSON.stringify(log)}, 'grandchild ' + process.pid + '\\n'); setInterval(() => {}, 1000)`], { stdio: "ignore" });
 
 const [bvh, fbx, clip] = argv.slice(argv.indexOf("--") + 1);
 console.error(`stub-blender-stderr ${clip}`);
 if (clip.startsWith("fail")) process.exit(1);
 if (clip.startsWith("silent")) process.exit(0);
+if (clip.startsWith("garbage")) {
+  console.log('VILI-FBX {"bones":"many","frames":[1],"fps":30}');
+  process.exit(0);
+}
+if (clip.startsWith("nofile")) {
+  console.log(result);
+  process.exit(0);
+}
 if (clip.startsWith("hang")) {
-  spawn(process.execPath, ["-e", `require('fs').appendFileSync(${JSON.stringify(log)}, 'grandchild ' + process.pid + '\\n'); setInterval(() => {}, 1000)`], { stdio: "ignore" });
+  spawnGrandchild();
   process.on("SIGTERM", () => {});
   setInterval(() => {}, 1000);
 } else {
   if (clip.startsWith("slow")) await new Promise((resolve) => setTimeout(resolve, 6000));
+  if (clip.startsWith("orphan")) {
+    const before = grandchildren();
+    spawnGrandchild();
+    for (let waited = 0; grandchildren() === before && waited < 3000; waited += 25) await new Promise((resolve) => setTimeout(resolve, 25));
+  }
   writeFileSync(fbx, Buffer.concat([Buffer.from("FBX-STUB:"), readFileSync(bvh)]));
-  console.log(`VILI-FBX ${JSON.stringify({ bones: 78, frames: [1, 60], fps: 30 })}`);
+  console.log(result);
 }
