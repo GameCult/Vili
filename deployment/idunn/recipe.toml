@@ -71,21 +71,21 @@ argv = ["tar", "-xzf", "release/cpython.tar.gz", "-C", "release"]
 id = "install-build-tools"
 phase = "prepare"
 runner = "python-build"
-required_environment = ["HOME", "PIP_CACHE_DIR", "TMPDIR"]
+required_environment = ["HOME", "PIP_CACHE_DIR", "TMPDIR", "PATH", "PIP_DISABLE_PIP_VERSION_CHECK", "PIP_NO_INPUT"]
 argv = ["python3.12", "-m", "pip", "install", "--no-deps", "--require-hashes", "-r", "deployment/idunn/requirements-build.lock"]
 
 [[steps]]
 id = "install-locked-packages"
 phase = "prepare"
 runner = "python-build"
-required_environment = ["HOME", "PIP_CACHE_DIR", "TMPDIR"]
+required_environment = ["HOME", "PIP_CACHE_DIR", "TMPDIR", "PATH", "PIP_DISABLE_PIP_VERSION_CHECK", "PIP_NO_INPUT"]
 argv = ["python3.12", "-m", "pip", "install", "--no-deps", "--require-hashes", "--no-build-isolation", "-r", "deployment/idunn/requirements.lock"]
 
 [[steps]]
 id = "install-vendored-packages"
 phase = "prepare"
 runner = "python-build"
-required_environment = ["HOME", "PIP_CACHE_DIR", "TMPDIR"]
+required_environment = ["HOME", "PIP_CACHE_DIR", "TMPDIR", "PATH", "PIP_DISABLE_PIP_VERSION_CHECK", "PIP_NO_INPUT"]
 argv = ["python3.12", "-m", "pip", "install", "--no-deps", "--no-build-isolation", "--no-index", "vendor/SOMA-X", "vendor/kimodo/MotionCorrection", "vendor/kimodo"]
 
 [[steps]]
@@ -93,7 +93,7 @@ id = "test-worker"
 phase = "test"
 runner = "python-build"
 working_directory = "."
-required_environment = ["HOME", "TMPDIR", "PYTHONPATH"]
+required_environment = ["HOME", "TMPDIR", "PYTHONPATH", "PATH"]
 argv = ["python3.12", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_*.py"]
 
 # Every module the worker and the encoder child import at top level, kimodo.scripts.generate included.
@@ -101,7 +101,7 @@ argv = ["python3.12", "-m", "unittest", "discover", "-s", "scripts", "-p", "test
 id = "import-smoke"
 phase = "acceptance"
 runner = "python-build"
-required_environment = ["HOME", "TMPDIR", "PYTHONPATH"]
+required_environment = ["HOME", "TMPDIR", "PYTHONPATH", "PATH"]
 argv = [
   "python3.12", "-c",
   "import accelerate, cultcache_py, huggingface_hub.constants, kimodo, kimodo.constraints, kimodo.exports.motion_io, kimodo.meta, kimodo.model.llm2vec.llm2vec, kimodo.model.load_model, kimodo.model.loading, kimodo.model.registry, kimodo.scripts.generate, kimodo.tools, msgpack, peft, torch, transformers",
@@ -111,6 +111,7 @@ argv = [
 id = "compile-python"
 phase = "build"
 runner = "python-build"
+required_environment = ["PATH"]
 argv = ["python3.12", "-m", "compileall", "-q", "-j", "4", "--invalidation-mode", "unchecked-hash", "release/python/lib/python3.12"]
 
 # ---- the sealed release: node, vili, python
