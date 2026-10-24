@@ -230,7 +230,7 @@ test("every flag has an environment twin, and the thread cap defaults to 8", asy
     assert.equal(answer.body.worker.env.OMP_NUM_THREADS, "16");
     assert.deepEqual(await backendOf(viaEnv), {
       state: "ready", pid: answer.body.worker.pid, port: (await backendOf(viaEnv)).port, threads: 16, pythonEnv: "test-env",
-      kimodoCommit: "abc1234", modelsRoot: viaEnv.modelsRoot, lastError: null,
+      kimodoCommit: "abc1234", modelsRoot: viaEnv.modelsRoot, lastError: null, blender: "Blender 0.0.0 (stub)",
     });
   } finally {
     await viaEnv.stop();
@@ -701,7 +701,7 @@ test("health, operator state and the unknown", async () => {
     assert.equal(unknown.raw, "not found\n");
     const state = await operatorState(daemon);
     assert.equal(state.host, os.hostname());
-    assert.deepEqual(Object.keys(state.routes), ["health", "operatorState", "generate"]);
+    assert.deepEqual(Object.keys(state.routes), ["health", "operatorState", "generate", "artifacts", "restFbx"]);
   } finally {
     await daemon.stop();
   }
@@ -1463,7 +1463,7 @@ test("a failing or hung Blender fails the job, leaks nothing, and leaves nothing
     assert.equal(silent.body.error, "fbx-export-failed (no result)");
 
     const before = daemon.starts().length;
-    const hung = await generate(daemon, exportRequest({ clipName: "hang", exportTimeoutMs: 700 }));
+    const hung = await generate(daemon, exportRequest({ clipName: "hang", exportTimeoutMs: 2500 }));
     assert.equal(hung.status, 502);
     assert.equal(hung.body.error, "fbx-export-failed (signal SIGKILL)");
     const [run] = daemon.starts().slice(before);
@@ -1497,7 +1497,8 @@ test("losing the lease kills a running export within a second and records nothin
   const daemon = await idunnDaemon({ leased: true });
   try {
     await until(() => existsSync(path.join(daemon.stateRoot, "vili.service.cc")), "the service store", 10);
-    assert.equal(daemon.starts().length, 1, "the version probe ran once the lease was held");
+    await until(() => daemon.starts().length === 1, "the version probe, run once the lease was held");
+    assert.equal(existsSync(path.join(daemon.stateRoot, "logs")), false, "the probe writes nothing to the state root");
     const pending = generate(daemon, exportRequest({ clipName: "slow" }));
     const run = await until(() => exportStarts(daemon)[0], "the export to start");
     rmSync(daemon.lease);

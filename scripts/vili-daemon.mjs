@@ -501,13 +501,17 @@ let exportScriptDigest = null;
 const scriptDigest = () => (exportScriptDigest ??= `sha256:${createHash("sha256").update(readFileSync(exportScript)).digest("hex")}`);
 
 // Runs the sealed Blender in its own process group, niced, under the write gate. Both streams go to
-// logs/export.log line by line through mayWrite(), and only there. Resolves { code, signal, first, result }: the
-// exit, the first stdout line and the last `VILI-FBX ` line's payload. It rejects only with LeaseLost.
-async function runBlender(argv, timeoutMs) {
+// logs/export.log line by line through mayWrite(), and only there; the version probe is not logged, so it writes
+// nothing to the state root. Resolves { code, signal, first, result }: the exit, the first stdout line and the last
+// `VILI-FBX ` line's payload. It rejects only with LeaseLost.
+async function runBlender(argv, timeoutMs, logged = true) {
   guard();
-  await mkdir(path.join(args.stateRoot, "logs"), { recursive: true });
-  guard(); // synchronous with the log open and the spawn below: no await between them
-  const sink = openSync(path.join(args.stateRoot, "logs", "export.log"), "a");
+  let sink = null;
+  if (logged) {
+    await mkdir(path.join(args.stateRoot, "logs"), { recursive: true });
+    guard(); // synchronous with the log open and the spawn below: no await between them
+    sink = openSync(path.join(args.stateRoot, "logs", "export.log"), "a");
+  }
   const proc = spawn(args.blender, argv, {
     cwd: __dirname,
     env: exportEnv(),
@@ -517,7 +521,7 @@ async function runBlender(argv, timeoutMs) {
   });
   exportGroups.add(proc);
   const seen = { first: null, result: null };
-  let sinkOpen = true;
+  let sinkOpen = sink !== null;
   for (const [stream, isStdout] of [[proc.stdout, true], [proc.stderr, false]]) {
     if (!stream) continue;
     readline.createInterface({ input: stream }).on("line", (line) => {
@@ -547,15 +551,15 @@ async function runBlender(argv, timeoutMs) {
   const exit = await finished;
   clearTimeout(timer);
   exportGroups.delete(proc);
+  if (sink !== null) closeSync(sink);
   sinkOpen = false;
-  closeSync(sink);
   return { ...exit, ...seen };
 }
 
 // Blender answers once at start: `blender --version`, 15 s. Ready only when it exits 0 and names itself.
 async function probeBlender() {
   if (!args.blender) return;
-  const run = await runBlender(["-b", "--factory-startup", "--version"], 15000);
+  const run = await runBlender(["-b", "--factory-startup", "--version"], 15000, false);
   guard();
   blender.version = run.code === 0 && run.first?.startsWith("Blender ") ? run.first : null;
 }
