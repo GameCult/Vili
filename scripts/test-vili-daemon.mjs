@@ -898,6 +898,21 @@ for (const { when, absent } of losses) {
   });
 }
 
+// The daemon's own copy of a worker's stdout into worker.log is a write like any other.
+test("a worker's output line is not logged once the lease is gone", async () => {
+  const daemon = await idunnDaemon({ leased: true, loseWhenExists: "embeddings/stub-spawns.log" });
+  try {
+    await until(() => existsSync(path.join(daemon.stateRoot, "vili.service.cc")), "the service store", 10);
+    const answer = await generate(daemon);
+    assert.equal(answer.status, 503);
+    assert.equal(answer.body.code, "write-lease-lost");
+    const log = readFileSync(path.join(daemon.stateRoot, "logs", "worker.log"), "utf8");
+    assert.ok(!log.includes("stub-stdout-line"), "the daemon must not copy the worker's stdout after the loss");
+  } finally {
+    await daemon.stop();
+  }
+});
+
 // The lease goes while the first persist is under way: the daemon survives it, stays degraded, and the rest of the
 // startup writes are not made.
 test("a lease lost while the state root is opened leaves the daemon up, degraded and writing nothing more", async () => {
