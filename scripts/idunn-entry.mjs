@@ -110,6 +110,8 @@ export function daemonEnvironment(bind, entryDir) {
   const locks = ["requirements-build.lock", "requirements.lock"].map((name) =>
     readFileSync(path.resolve(entryDir, "..", "deployment", "idunn", name)));
   return {
+    // Idunn writes the bind as host:port; cultnet-ts compares it to the Expected route's endpoint, which has the scheme.
+    GAMECULT_IDUNN_CANDIDATE_BIND: `http://${host}:${port}`,
     VILI_DAEMON_HOST: host,
     VILI_DAEMON_PORT: port,
     VILI_PYTHON: path.resolve(entryDir, "..", "..", "python", "bin", "python3.12"),
