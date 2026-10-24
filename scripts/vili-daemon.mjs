@@ -778,9 +778,14 @@ export async function serve(rt) {
     stopWorker().finally(() => runtime.reportHealth?.("degraded"));
   };
   runtime.watch(onLost); // held() reports a loss through this the moment any gate sees it
-  guard();
-  await mkdir(path.join(args.stateRoot, "jobs"), { recursive: true });
-  await persistSurfaces();
+  try {
+    guard();
+    await mkdir(path.join(args.stateRoot, "jobs"), { recursive: true });
+    await persistSurfaces();
+  } catch (error) {
+    if (error instanceof LeaseLost) return; // lost while opening the state root: onLost has run, and nothing is active
+    throw error;
+  }
   surfaceTimer = setInterval(() => {
     runtime.watch(onLost);
     if (lost) return;
@@ -788,6 +793,7 @@ export async function serve(rt) {
       if (!(error instanceof LeaseLost)) console.error(`persist failed: ${error?.name || "Error"}`);
     });
   }, 5000);
+  if (lost) return;
   runtime.reportHealth?.("active");
   console.log("Vili holds the state root");
 }
