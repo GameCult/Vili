@@ -15,9 +15,10 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/dev/null
 apt-get install -y -qq --no-install-recommends curl ca-certificates xz-utils python3 >/dev/null
 
-# The test means nothing if the host can supply what the release should carry.
+# The test means nothing if the host can supply what the release should carry. (libmd.so.0 is exempt: dpkg needs it,
+# so even the slim image has it; the mapped-library allowlist below still demands that Blender load the release's copy.)
 host=$(find / -xdev \( -name 'libX11*' -o -name 'libxcb*' -o -name 'libXext*' -o -name 'libXau*' -o -name 'libXdmcp*' \
-  -o -name 'libbsd*' -o -name 'libmd.so*' -o -name 'libGL*' -o -name 'libXi.*' -o -name 'libxkbcommon*' \) 2>/dev/null | head -5)
+  -o -name 'libbsd*' -o -name 'libGL*' -o -name 'libXi.*' -o -name 'libxkbcommon*' \) 2>/dev/null | head -5)
 if [ -n "$host" ]; then echo "FAIL: the container carries X or GL libraries: $host"; exit 2; fi
 
 mkdir -p release
@@ -95,5 +96,7 @@ outside=$(grep -E '\.so(\.|$)|/ld-linux' mapped.fbx.maps | grep -v "^$PWD/releas
 echo "$outside"
 bad=$(echo "$outside" | grep -v -E '^$|/(libc|libm|libdl|libpthread|librt|libutil|libresolv|libgcc_s|libstdc\+\+|libuuid)\.so[.0-9]*$|/ld-linux-x86-64\.so\.[0-9]+$|/libc-[0-9.]+\.so$|/libm-[0-9.]+\.so$' || true)
 if [ -n "$bad" ]; then echo "FAIL: host libraries outside the allowlist:"; echo "$bad"; exit 1; fi
-test -n "$(grep -c "^$PWD/release/blender/lib/libX11" mapped.fbx.maps | grep -v '^0$')" || { echo "FAIL: libX11 was not loaded from the release"; exit 1; }
+for name in libX11 libmd; do
+  grep -q "^$PWD/release/blender/lib/$name\." mapped.fbx.maps || { echo "FAIL: $name was not loaded from the release"; exit 1; }
+done
 echo "SELFCONTAINED-OK"
