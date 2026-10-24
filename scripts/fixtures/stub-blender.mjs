@@ -28,7 +28,7 @@ console.error(`stub-blender-stderr ${clip}`);
 if (clip.startsWith("fail")) process.exit(1);
 if (clip.startsWith("silent")) process.exit(0);
 if (clip.startsWith("hang")) {
-  spawn(process.execPath, ["-e", `require('fs').appendFileSync(${JSON.stringify(log)}, 'grandchild ' + process.pid + '\n'); setInterval(() => {}, 1000)`], { stdio: "ignore" });
+  spawn(process.execPath, ["-e", `require('fs').appendFileSync(${JSON.stringify(log)}, 'grandchild ' + process.pid + '\\n'); setInterval(() => {}, 1000)`], { stdio: "ignore" });
   process.on("SIGTERM", () => {});
   setInterval(() => {}, 1000);
 } else {
