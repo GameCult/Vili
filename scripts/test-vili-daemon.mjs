@@ -874,7 +874,7 @@ const losses = [
   { when: "artifacts/*/meta.json", absent: ["logs", "embeddings"] },
   { when: "logs", absent: ["embeddings"] },
   { when: "embeddings", absent: ["logs/worker.log"] },
-  { when: "embeddings/stub-spawns.log", absent: ["artifacts/*/request.json", "jobs/*"] },
+  { when: "embeddings/stub-healthy", absent: ["artifacts/*/request.json", "jobs/*"] },
 ];
 for (const { when, absent } of losses) {
   test(`a request is stopped at its next write when the lease goes at ${when}`, async () => {

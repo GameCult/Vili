@@ -6,7 +6,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 
 const argv = process.argv.slice(2);
 const flag = (name) => {
@@ -56,6 +56,7 @@ if (model === "hang-before-ready") {
       if (request.method === "GET" && request.url === "/health") {
         healthCalls += 1;
         if (model === "sick" || model === "die-after-ready" || (model === "slow-health" && healthCalls <= 2)) return send(200, { ok: false });
+        writeFileSync(path.join(process.env.VILI_EMBEDDINGS_DIR, "stub-healthy"), ""); // a test can act the moment the worker is healthy
         send(200, { ok: true, model: model || "stub-model", displayModel: model || "Stub Model", pid: process.pid, requests });
       } else if (request.method === "POST" && request.url === "/generate") {
         requests += 1;
