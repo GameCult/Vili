@@ -571,7 +571,6 @@ async function exportClip(bvh, fbx, clipName, timeoutMs) {
     "-b", "--factory-startup", "--python-use-system-env", "--python-exit-code", "1",
     "--python", exportScript, "--", bvh, fbx, clipName,
   ], timeoutMs);
-  guard(); // the writer may have been lost while Blender ran
   let info = null;
   if (run.code === 0 && run.result !== null) {
     try {

@@ -1464,6 +1464,9 @@ test("a failing or hung Blender fails the job, leaks nothing, and leaves nothing
       assert.equal(odd.status, 502, clip);
       assert.equal(odd.body.error, "fbx-export-failed (no result)", clip);
     }
+    const lied = await generate(daemon, exportRequest({ clipName: "lies" }));
+    assert.equal(lied.status, 502, "an export that exits non-zero is no export, whatever it printed");
+    assert.equal(lied.body.error, "fbx-export-failed (exit 3)");
 
     const known = new Set(daemon.blenderGrandchildren());
     const orphaned = await generate(daemon, exportRequest({ clipName: "orphan" }));
@@ -1473,7 +1476,10 @@ test("a failing or hung Blender fails the job, leaks nothing, and leaves nothing
 
     const before = daemon.starts().length;
     known.add(left);
-    const hung = await generate(daemon, exportRequest({ clipName: "hang", exportTimeoutMs: 2500 }));
+    const hung = await Promise.race([
+      generate(daemon, exportRequest({ clipName: "hang", exportTimeoutMs: 2500 })),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("the hung export was never stopped")), 20000)),
+    ]);
     assert.equal(hung.status, 502);
     assert.equal(hung.body.error, "fbx-export-failed (signal SIGKILL)");
     const [run] = daemon.starts().slice(before);
@@ -1498,6 +1504,24 @@ test("SIGTERM during an export stops its group, writes nothing more, and exits 0
     assert.deepEqual(jobFiles(daemon), [], "no record after the signal");
     const [artifacts] = [path.join(daemon.stateRoot, "artifacts")];
     for (const job of readdirSync(artifacts)) assert.equal(existsSync(path.join(artifacts, job, "motion.fbx")), false);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("what a stopping export still prints is not logged, and it is killed when it ignores SIGTERM", async () => {
+  const daemon = await startDaemon();
+  try {
+    const pending = generate(daemon, exportRequest({ clipName: "hang", exportTimeoutMs: 60000 }));
+    pending.catch(() => {});
+    const run = await until(() => exportStarts(daemon)[0], "the export to start");
+    daemon.proc.kill("SIGTERM");
+    await until(() => daemon.proc.exitCode !== null, "the daemon to exit", 30);
+    assert.equal(daemon.proc.exitCode, 0);
+    await until(() => !isAlive(run.pid), "the export that ignored SIGTERM to be killed");
+    const log = readFileSync(path.join(daemon.stateRoot, "logs", "export.log"), "utf8");
+    assert.match(log, /stub-blender-stderr hang/);
+    assert.ok(!log.includes("after-sigterm-line"), "a line printed after the signal reached the log");
   } finally {
     await daemon.stop();
   }

@@ -4,8 +4,9 @@
 // like Blender, unless the copy is named blender-broken, which names itself and exits 1. An export
 // (`... -- <bvh> <fbx> <clip>`) acts on the clip name:
 //   fail*     prints a line to stderr, exits 1        silent*   exits 0 with no result line
-//   garbage*  exits 0 with a malformed result line    nofile*   exits 0 with a result line and no FBX
-//   hang*     a grandchild, then never exits          slow*     runs 6 s, then behaves
+//   garbage*  an FBX, then a malformed result line   nofile*   exits 0 with a result line and no FBX
+//   lies*     an FBX and a result line, exits 3       slow*     runs 6 s, then behaves
+//   hang*     a grandchild, then never exits; after SIGTERM it prints a line every 100 ms
 //   orphan*   behaves, but leaves a grandchild running when it exits
 //   other     writes "FBX-STUB:" + the BVH's bytes to <fbx> and prints the VILI-FBX result line
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -33,9 +34,16 @@ const [bvh, fbx, clip] = argv.slice(argv.indexOf("--") + 1);
 console.error(`stub-blender-stderr ${clip}`);
 if (clip.startsWith("fail")) process.exit(1);
 if (clip.startsWith("silent")) process.exit(0);
+const writeFbx = () => writeFileSync(fbx, Buffer.concat([Buffer.from("FBX-STUB:"), readFileSync(bvh)]));
 if (clip.startsWith("garbage")) {
+  writeFbx();
   console.log('VILI-FBX {"bones":"many","frames":[1],"fps":30}');
   process.exit(0);
+}
+if (clip.startsWith("lies")) {
+  writeFbx();
+  console.log(result);
+  process.exit(3);
 }
 if (clip.startsWith("nofile")) {
   console.log(result);
@@ -43,7 +51,7 @@ if (clip.startsWith("nofile")) {
 }
 if (clip.startsWith("hang")) {
   spawnGrandchild();
-  process.on("SIGTERM", () => {});
+  process.on("SIGTERM", () => setInterval(() => console.error("after-sigterm-line"), 100));
   setInterval(() => {}, 1000);
 } else {
   if (clip.startsWith("slow")) await new Promise((resolve) => setTimeout(resolve, 6000));
@@ -52,6 +60,6 @@ if (clip.startsWith("hang")) {
     spawnGrandchild().unref(); // a live child would keep this process, and so the export, alive
     for (let waited = 0; grandchildren() === before && waited < 3000; waited += 25) await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  writeFileSync(fbx, Buffer.concat([Buffer.from("FBX-STUB:"), readFileSync(bvh)]));
+  writeFbx();
   console.log(result);
 }
