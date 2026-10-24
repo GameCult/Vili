@@ -1173,6 +1173,7 @@ for (const kind of ["fake Idunn entry", "hand-run"]) {
       assert.deepEqual(readdirSync(path.join(daemon.stateRoot, "artifacts")), artifacts, "no artifact is created after the signal");
       assert.deepEqual(readdirSync(path.join(daemon.stateRoot, "jobs")), [], "no job is recorded after the signal");
       assert.equal(statSync(store).mtimeMs, storeBefore);
+      assert.ok(!readFileSync(path.join(daemon.stateRoot, "logs", "worker.log"), "utf8").includes("stopping-line"), "the worker's output while it stops is not copied");
     } finally {
       await daemon.stop();
     }

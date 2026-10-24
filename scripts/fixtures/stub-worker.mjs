@@ -1,7 +1,7 @@
 // Stands in for kimodo-resident-worker.py in the daemon's tests. It binds port 0, prints the ready line the
 // daemon waits for, and answers /health and /generate with what the daemon gave it. The --model value picks a
 // misbehaviour: crash-before-ready, hang-before-ready, sick, slow-health, stubborn, fail-generate,
-// refuse-generate, drop-generate, slow-generate, writer (appends to <output>.writes every 50 ms and never answers), slow-to-stop (no answer; exits 1.5 s after SIGTERM), chatty (prints a line the moment it is healthy), encoder (a grandchild, then no answer), graceful (exits 0.5 s after SIGTERM), die-after-ready. Any other value is just the model the worker serves.
+// refuse-generate, drop-generate, slow-generate, writer (appends to <output>.writes every 50 ms, never answers, ignores SIGTERM), slow-to-stop (no answer; prints a line and exits 1.5 s after SIGTERM), chatty (prints a line the moment it is healthy), encoder (a grandchild, then no answer), graceful (exits 0.5 s after SIGTERM), die-after-ready. Any other value is just the model the worker serves.
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -33,7 +33,11 @@ if (model === "stubborn") {
   spawn(process.execPath, ["-e", `process.on('SIGTERM', () => {}); require('fs').appendFileSync(${JSON.stringify(spawnLog)}, 'grandchild ' + process.pid + '\\n'); setInterval(() => {}, 1000)`], { stdio: "ignore" });
 }
 
-if (model === "slow-to-stop") process.on("SIGTERM", () => setTimeout(() => process.exit(0), 1500));
+if (model === "slow-to-stop") process.on("SIGTERM", () => {
+  console.log("stopping-line"); // output while it stops
+  setTimeout(() => process.exit(0), 1500);
+});
+if (model === "writer") process.on("SIGTERM", () => {}); // a worker that carries on writing through SIGTERM
 
 if (model === "graceful") {
   process.on("SIGTERM", () => {
