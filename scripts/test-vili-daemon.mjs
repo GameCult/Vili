@@ -1830,6 +1830,7 @@ test("the lease goes between rest-fbx's directory and its copy: nothing is copie
   const daemon = await idunnDaemon({ leased: true, loseWhenExists: "artifacts/*", python: rest.python });
   try {
     await until(() => existsSync(path.join(daemon.stateRoot, "vili.service.cc")), "the service store", 10);
+    await until(async () => /^Blender /.test((await backendOf(daemon)).blender), "the Blender probe");
     const answer = await restRequest(daemon);
     assert.equal(answer.status, 503);
     assert.equal(answer.body.code, "write-lease-lost");
