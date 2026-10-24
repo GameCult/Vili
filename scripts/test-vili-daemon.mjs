@@ -1112,8 +1112,8 @@ test("the entry derives the daemon's host, port, interpreter and environment ide
 });
 
 // The lease is asked while a generate awaits its worker, not only when the service documents are rewritten. The
-// bound is one WATCH_MS ask plus the SIGKILL; the test allows a second. The loss is made right after a rewrite, the
-// longest wait for an implementation that asks only then.
+// bound is one WATCH_MS ask plus the SIGKILL; the test allows a second. The loss is made just after a rewrite of the
+// service documents (whose own gates have asked), the longest wait for an implementation that asks only then.
 test("a worker still writing when the lease is lost is dead within a second", async () => {
   const daemon = await idunnDaemon({ leased: true });
   try {
@@ -1133,6 +1133,7 @@ test("a worker still writing when the lease is lost is dead within a second", as
     const [worker] = daemon.spawns();
     const rewritten = statSync(store).mtimeMs;
     await until(() => statSync(store).mtimeMs !== rewritten, "the service documents to be rewritten", 8);
+    await new Promise((resolve) => setTimeout(resolve, 150)); // the rewrite is done: its own gates have asked
     const lostAt = Date.now();
     rmSync(daemon.lease);
     await until(() => !isAlive(worker), "the worker to die", 10);
