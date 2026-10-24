@@ -47,6 +47,7 @@ if action is not None:
     frames = range(first, last + 3)
     out["hips_travel"] = max((world("Hips", f) - world("Hips", first)).length for f in frames)
     out["hips_mid"] = (world("Hips", first + 1 + 15) - world("Hips", first)).length
+    out["hips_curve"] = [list(world("Hips", first + 1 + i)) for i in range(31)]
     out["root_wander"] = max((world("Root", f) - world("Root", first)).length for f in frames)
     out["head_from_hips"] = list(world("Head", first + 1 + 15) - world("Hips", first + 1 + 15))
     if len(argv) > 1:
@@ -56,6 +57,7 @@ if action is not None:
         scene = bpy.context.scene
         arm = bpy.context.view_layer.objects.active
         out["reference_head_from_hips"] = list(world("Head", 1 + 15) - world("Hips", 1 + 15))
+        out["reference_hips_curve"] = [list(world("Hips", 1 + i)) for i in range(31)]
 print("INSPECT " + json.dumps(out))
 '''
 
@@ -98,6 +100,35 @@ def unit_scale_factor(fbx):
         position += 5 + struct.unpack("<I", raw[position + 1:position + 5])[0]
     assert raw[position:position + 1] == b"D"
     return struct.unpack("<d", raw[position + 1:position + 9])[0]
+
+
+def fbx_header_time(fbx):
+    """The FBXHeaderExtension's CreationTimeStamp fields (Year ... Millisecond), read from a binary FBX. Each is a node
+    whose one property is an int32: name length, name, type code 'I', value."""
+    raw = pathlib.Path(fbx).read_bytes()
+    position = raw.index(b"CreationTimeStamp")
+    fields = []
+    for name in ("Year", "Month", "Day", "Hour", "Minute", "Second", "Millisecond"):
+        tag = bytes([len(name)]) + name.encode()
+        position = raw.index(tag, position) + len(tag)
+        assert raw[position:position + 1] == b"I", name
+        fields.append(struct.unpack("<i", raw[position + 1:position + 5])[0])
+        position += 5
+    return fields
+
+
+def fbx_key_counts(fbx):
+    """The key count of every animation curve in a binary FBX: each KeyTime node's one property is an int64 array,
+    whose header is type code 'l', element count, encoding, compressed length."""
+    raw = pathlib.Path(fbx).read_bytes()
+    counts, position = [], 0
+    while True:
+        position = raw.find(b"\x07KeyTime", position)
+        if position < 0:
+            return counts
+        position += len(b"\x07KeyTime")
+        assert raw[position:position + 1] == b"l"
+        counts.append(struct.unpack("<I", raw[position + 1:position + 5])[0])
 
 
 def rest_bvh():
@@ -145,6 +176,11 @@ class BvhToFbx(unittest.TestCase):
             self.assertEqual(convert(self.rest, target, "twin").returncode, 0)
         self.assertEqual(first.read_bytes(), second.read_bytes())
 
+    def test_the_header_is_stamped_with_the_epoch_not_the_clock(self):
+        fbx = self.dir / "epoch.fbx"
+        self.assertEqual(convert(self.rest, fbx, "epoch").returncode, 0)
+        self.assertEqual(fbx_header_time(fbx), [1970, 1, 1, 0, 0, 0, 0])
+
     def test_without_a_fixed_hash_seed_the_script_exits_3(self):
         env = export_env()
         del env["PYTHONHASHSEED"]
@@ -176,6 +212,13 @@ class BvhToFbx(unittest.TestCase):
         self.assertAlmostEqual(seen["hips_travel"], 1.0, delta=0.001, msg=json.dumps(seen))
         self.assertAlmostEqual(seen["hips_mid"], 0.25, delta=0.002, msg="every key is kept, none simplified away")
         self.assertLess(seen["root_wander"], 1e-4)
+        for index, (got, want) in enumerate(zip(seen["hips_curve"], seen["reference_hips_curve"])):
+            for axis in range(3):
+                self.assertAlmostEqual(got[axis] - seen["hips_curve"][0][axis], want[axis] - seen["reference_hips_curve"][0][axis],
+                                       delta=2e-4, msg=f"frame {index} axis {axis}: no key is dropped or resampled")
+        counts = fbx_key_counts(fbx)
+        self.assertTrue(counts, "the FBX carries animation curves")
+        self.assertEqual(set(counts), {frames}, "every curve keeps one key per BVH frame, none simplified away")
         for got, want in zip(seen["head_from_hips"], seen["reference_head_from_hips"]):
             self.assertAlmostEqual(got, want, delta=0.002, msg="the rotated pose is Blender's own native reading of the BVH")
 

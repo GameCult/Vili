@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
@@ -818,13 +818,13 @@ for (let trial = 1; trial <= 10; trial += 1) {
     }
   });
 }
-const idunnDaemon = async ({ leased = false, extraEnv = {}, loseWhenExists = null } = {}) => {
+const idunnDaemon = async ({ leased = false, extraEnv = {}, loseWhenExists = null, python = undefined } = {}) => {
   const root = mkdtempSync(path.join(os.tmpdir(), "vili-test-"));
   const lease = path.join(root, "lease");
   const healthLog = path.join(root, "health.log");
   if (leased) writeFileSync(lease, "");
   const daemon = await startDaemon({
-    root, nested: true, entry: fakeIdunnEntry, extraEnv: {
+    root, nested: true, entry: fakeIdunnEntry, ...(python ? { python } : {}), extraEnv: {
       FAKE_IDUNN_LEASE: lease, FAKE_IDUNN_HEALTH_LOG: healthLog, ...extraEnv,
       ...(loseWhenExists ? { FAKE_IDUNN_STATE_ROOT: path.join(root, "a", "b", "state"), FAKE_IDUNN_LOSE_WHEN_EXISTS: loseWhenExists } : {}),
     },
@@ -1174,6 +1174,8 @@ test("the entry derives the daemon's host, port, interpreter and environment ide
       assert.equal(derived.GAMECULT_IDUNN_CANDIDATE_BIND, "http://127.0.0.1:18861", "cultnet-ts compares the bind to the Expected route's endpoint, which carries the scheme Idunn's bare host:port lacks");
       assert.equal(derived.VILI_PYTHON, path.join(release, "python", "bin", "python3.12"));
       assert.equal(derived.VILI_BLENDER, path.join(release, "blender", "blender"));
+      assert.deepEqual(Object.keys(derived).sort(), ["GAMECULT_IDUNN_CANDIDATE_BIND", "VILI_BLENDER", "VILI_DAEMON_HOST", "VILI_DAEMON_PORT", "VILI_PYTHON", "VILI_PYTHON_ENV"],
+        "the entry sets exactly these: no LD_LIBRARY_PATH for the whole unit");
       assert.equal(derived.VILI_PYTHON_ENV, `locks-sha256:${createHash("sha256").update("build lock bytes\nruntime lock bytes\n").digest("hex")}`);
     }
   } finally {
@@ -1630,14 +1632,20 @@ test("the artifact read route serves only a job's own FBX and BVH files", async 
   }
 });
 
-test("rest-fbx is a job whose FBX is readable", async () => {
-  const pyRoot = mkdtempSync(path.join(os.tmpdir(), "vili-py-"));
-  const python = path.join(pyRoot, "bin", "python3.12");
+// A worker interpreter whose site-packages carry Kimodo's rest skeleton, as the release's does: the stub worker runs on node.
+function restPython() {
+  const root = mkdtempSync(path.join(os.tmpdir(), "vili-py-"));
+  const python = path.join(root, "bin", "python3.12");
   mkdirSync(path.dirname(python), { recursive: true });
   symlinkSync(process.execPath, python);
-  const skeletons = path.join(pyRoot, "lib", "python3.12", "site-packages", "kimodo", "assets", "skeletons", "somaskel77");
+  const skeletons = path.join(root, "lib", "python3.12", "site-packages", "kimodo", "assets", "skeletons", "somaskel77");
   mkdirSync(skeletons, { recursive: true });
   writeFileSync(path.join(skeletons, "somaskel77_standard_tpose.bvh"), "REST-BVH\n");
+  return { root, python };
+}
+
+test("rest-fbx is a job whose FBX is readable", async () => {
+  const { root: pyRoot, python } = restPython();
   const daemon = await startDaemon({ python });
   try {
     const answer = await request(daemon.port, "POST", "/motion/rest-fbx", { body: "{}", headers: { "content-type": "application/json" } });
@@ -1694,6 +1702,154 @@ test("operator state and the command boundary name the export", async () => {
     assert.equal(state.routes.artifacts, "/motion/artifacts/{jobId}/{name}");
     assert.equal(state.routes.restFbx, "/motion/rest-fbx");
     assert.ok(state.authority.owns.includes("clip export to FBX"));
+  } finally {
+    await daemon.stop();
+  }
+});
+
+// ---- Findings of Soul's pass s1 on the FBX export (motion-pipeline:verdict:cut-vili-fbx-export.s1).
+
+const readJson = (file) => JSON.parse(readFileSync(file, "utf8"));
+const restRequest = (daemon) => request(daemon.port, "POST", "/motion/rest-fbx", { body: "{}", headers: { "content-type": "application/json" } });
+
+test("concurrent generate and rest-fbx requests never share a job id, a directory, a record or a file", async () => {
+  const rest = restPython();
+  const daemon = await startDaemon({ python: rest.python });
+  try {
+    const answers = [];
+    for (let round = 0; round < 10; round += 1) {
+      answers.push(...await Promise.all([
+        generate(daemon, exportRequest({ clipName: `a${round}` })),
+        generate(daemon, exportRequest({ clipName: `b${round}` })),
+        restRequest(daemon),
+        restRequest(daemon),
+      ]));
+    }
+    assert.equal(answers.length, 40);
+    for (const answer of answers) {
+      assert.equal(answer.status, 200, answer.raw.slice(0, 300));
+      assert.equal(answer.body.ok, true);
+    }
+    const ids = answers.map((answer) => answer.body.jobId);
+    assert.equal(new Set(ids).size, 40, "every job has its own id");
+    assert.equal(new Set(answers.map((answer) => answer.body.artifactDir)).size, 40, "and its own directory");
+    assert.deepEqual(readdirSync(path.join(daemon.stateRoot, "artifacts")).sort(), [...ids].sort());
+    assert.deepEqual(readdirSync(path.join(daemon.stateRoot, "jobs")).sort(), ids.map((id) => `${id}.json`).sort(), "and its own record");
+    for (const { body } of answers) {
+      assert.deepEqual(readJson(path.join(daemon.stateRoot, "jobs", `${body.jobId}.json`)), body, "the record is the job's own answer");
+      assert.equal(body.export.clips.length, 1);
+    }
+    const names = answers.filter((answer) => answer.body.jobId.startsWith("vili-")).map((answer) => answer.body.export.clips[0].clipName).sort();
+    assert.deepEqual(names, Array.from({ length: 10 }, (_, round) => [`a${round}`, `b${round}`]).flat().sort(), "each generate job exported its own clip");
+    const first = answers[0].body.jobId;
+    assert.equal((await getArtifact(daemon, `/motion/artifacts/${first}/motion.fbx`)).status, 200, "the read route serves the minted ids");
+  } finally {
+    await daemon.stop();
+    rmSync(rest.root, { recursive: true, force: true });
+  }
+});
+
+test("a seed that is not an integer from 0 to 2^31 is refused before anything is written, without echoing it", async () => {
+  const daemon = await startDaemon();
+  try {
+    const bad = [7.9, "7", "canary", [], [3], true, -1, 2 ** 31, 1e21, { canary: 1 }];
+    for (const seed of bad) {
+      for (const payload of [exportRequest({ seed }), exportRequest({ meta: { seed } })]) {
+        const answer = await generate(daemon, payload);
+        assert.equal(answer.status, 400, JSON.stringify(payload));
+        assert.ok(!answer.raw.includes("canary"), "the refusal repeated the input");
+        assert.ok(!answer.raw.includes("7.9"), "the refusal repeated the input");
+      }
+    }
+    assert.equal(existsSync(path.join(daemon.stateRoot, "artifacts")), false, "nothing was written");
+    assert.deepEqual(daemon.spawns(), [], "no worker was started");
+    assert.equal(exportStarts(daemon).length, 0);
+    for (const seed of [0, 2 ** 31 - 1]) {
+      const job = (await generate(daemon, exportRequest({ seed }))).body;
+      assert.equal(job.seed, seed);
+      assert.equal(job.worker.seed, seed, "the seed recorded is the seed the worker was given");
+    }
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("a BVH or FBX path swapped for a symlink after the job was checked is never followed", async () => {
+  for (const swap of ["bvh", "fbx", "both"]) {
+    const daemon = await startDaemon();
+    try {
+      const outside = path.join(daemon.root, "outside-secret");
+      const victim = path.join(daemon.root, "victim");
+      writeFileSync(outside, "SECRET");
+      writeFileSync(victim, "VICTIM");
+      // sample 0 ("slow_00") exports for six seconds; the swap lands while it does, before sample 1 is touched
+      const pending = generate(daemon, exportRequest({ clipName: "slow", numSamples: 2 }));
+      await until(() => exportStarts(daemon).length === 1, "the first export to start");
+      const [job] = readdirSync(path.join(daemon.stateRoot, "artifacts"));
+      const motion = path.join(daemon.stateRoot, "artifacts", job, "motion");
+      if (swap !== "fbx") {
+        rmSync(path.join(motion, "motion_01.bvh"));
+        symlinkSync(outside, path.join(motion, "motion_01.bvh"));
+      }
+      if (swap !== "bvh") symlinkSync(victim, path.join(motion, "motion_01.fbx"));
+      const answer = await pending;
+      assert.equal(answer.status, 502, swap);
+      assert.equal(answer.body.ok, false);
+      assert.equal(readFileSync(victim, "utf8"), "VICTIM", `${swap}: nothing was written through the planted link`);
+      assert.equal(readFileSync(outside, "utf8"), "SECRET");
+      for (const name of readdirSync(motion)) {
+        if (name.endsWith(".fbx") && !lstatSync(path.join(motion, name)).isSymbolicLink()) {
+          assert.ok(!readFileSync(path.join(motion, name), "utf8").includes("SECRET"), `${swap}: ${name} holds bytes read through the planted link`);
+        }
+      }
+      assert.ok(!answer.raw.includes("SECRET") && !answer.raw.includes("VICTIM"));
+    } finally {
+      await daemon.stop();
+    }
+  }
+});
+
+test("the worker's environment is its named keys, and LD_LIBRARY_PATH reaches Blender only", async () => {
+  const daemon = await startDaemon({ extraEnv: { LD_LIBRARY_PATH: "/canary-lib" } });
+  try {
+    const job = (await generate(daemon, exportRequest({ clipName: "wave" }))).body;
+    assert.equal(job.ok, true);
+    const named = ["HF_HOME", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "VILI_EMBEDDINGS_DIR", "VILI_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+      "PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "VILI_KIMODO_COMMIT", "VILI_PYTHON_ENV"];
+    const forwarded = ["PATH", "HOME", "LANG"].filter((name) => process.env[name] !== undefined || name === "LANG");
+    assert.deepEqual(job.worker.envKeys, [...named, ...forwarded].sort(), "the worker gets exactly these keys, LD_LIBRARY_PATH not among them");
+    const run = daemon.starts().find((start) => start.argv.includes("--"));
+    assert.equal(run.env.LD_LIBRARY_PATH, path.join(daemon.blenderDir, "lib"), "Blender gets the release's libraries, not the host's");
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("the lease goes between rest-fbx's directory and its copy: nothing is copied, nothing is exported", async () => {
+  const rest = restPython();
+  const daemon = await idunnDaemon({ leased: true, loseWhenExists: "artifacts/*", python: rest.python });
+  try {
+    await until(() => existsSync(path.join(daemon.stateRoot, "vili.service.cc")), "the service store", 10);
+    const answer = await restRequest(daemon);
+    assert.equal(answer.status, 503);
+    assert.equal(answer.body.code, "write-lease-lost");
+    for (const job of readdirSync(path.join(daemon.stateRoot, "artifacts"))) {
+      assert.deepEqual(readdirSync(path.join(daemon.stateRoot, "artifacts", job)), [], "the job's directory is empty");
+    }
+    assert.equal(exportStarts(daemon).length, 0);
+  } finally {
+    await daemon.stop();
+    rmSync(rest.root, { recursive: true, force: true });
+  }
+});
+
+test("the job record lists regular files only: a planted symlink, to a file or to a directory, is not listed", async () => {
+  const daemon = await startDaemon();
+  try {
+    const job = (await generate(daemon, exportRequest({ model: "plant-link", clipName: "plant" }))).body;
+    assert.equal(job.ok, true);
+    assert.equal(readdirSync(job.artifactDir).filter((name) => name.includes("link")).length, 2, "both symlinks are in the job directory");
+    assert.deepEqual(job.files.map((file) => file.name), ["meta.json", "motion.bvh", "motion.fbx", "motion.npz", "request.json"]);
   } finally {
     await daemon.stop();
   }

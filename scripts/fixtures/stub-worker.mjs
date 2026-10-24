@@ -1,7 +1,7 @@
 // Stands in for kimodo-resident-worker.py in the daemon's tests. It binds port 0, prints the ready line the
 // daemon waits for, and answers /health and /generate with what the daemon gave it. The --model value picks a
 // misbehaviour: crash-before-ready, hang-before-ready, sick, slow-health, stubborn, fail-generate,
-// refuse-generate, drop-generate, slow-generate, writer (appends to <output>.writes every 50 ms, never answers, ignores SIGTERM), slow-to-stop (no answer; prints a line and exits 1.5 s after SIGTERM), chatty (prints a line the moment it is healthy), encoder (a grandchild, then no answer), graceful (exits 0.5 s after SIGTERM), die-after-ready, bvh-outside (lists a BVH outside the job's directory), bvh-link (lists a symlink as its BVH). A request with bvh writes <output>.bvh (motion/motion_NN.bvh for several samples) and lists it. Any other value is just the model the worker serves.
+// refuse-generate, drop-generate, slow-generate, writer (appends to <output>.writes every 50 ms, never answers, ignores SIGTERM), slow-to-stop (no answer; prints a line and exits 1.5 s after SIGTERM), chatty (prints a line the moment it is healthy), encoder (a grandchild, then no answer), graceful (exits 0.5 s after SIGTERM), die-after-ready, bvh-outside (lists a BVH outside the job's directory), bvh-link (lists a symlink as its BVH), plant-link (a normal answer with a file symlink and a directory symlink planted beside the BVH). A request with bvh writes <output>.bvh (motion/motion_NN.bvh for several samples) and lists it. Any other value is just the model the worker serves.
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -102,6 +102,13 @@ if (model === "hang-before-ready") {
             files = [`${payload.output}.npz`, `${payload.output}.bvh`];
           }
         }
+        if (model === "plant-link") {
+          const outside = path.join(path.dirname(payload.output), "..", "outside.bvh");
+          writeFileSync(outside, "BVH-OUTSIDE
+");
+          symlinkSync(outside, `${payload.output}.link`);
+          symlinkSync(path.dirname(outside), `${payload.output}-linkdir`);
+        }
         send(200, {
           ok: true,
           files,
@@ -134,6 +141,7 @@ if (model === "hang-before-ready") {
             LANG: process.env.LANG,
             LEAK_CHECK: process.env.LEAK_CHECK,
           },
+          envKeys: Object.keys(process.env).sort(),
           argv,
         });
       } else {
