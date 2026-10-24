@@ -1,5 +1,5 @@
 # Converts one Kimodo standard-T-pose BVH to one FBX. Blender converts formats and nothing else: no retarget, no
-# rename, no key reduction, no resample, no in-place bake. Run by the daemon (scripts/vili-daemon.mjs exportClip):
+# rename, no key reduction, no resample, no root-motion bake. Run by the daemon (scripts/vili-daemon.mjs exportClip):
 #   blender -b --factory-startup --python-use-system-env --python-exit-code 1 --python bvh-to-fbx.py -- <bvh> <fbx> <clipName>
 # with PYTHONHASHSEED=0 in the environment. The settings are Blender API parameters, cross-checked against the
 # 'unity' preset of wifimetas/kimodo-mcp blender_export.py (Apache-2.0, 83b5361); no code is copied.
