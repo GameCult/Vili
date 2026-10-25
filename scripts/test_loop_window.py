@@ -1,4 +1,4 @@
-"""python3 -m unittest scripts/test_loop_window.py   (numpy only)"""
+"""python3 -m unittest scripts/test_loop_window.py   (numpy, torch and kimodo; no model weights)"""
 import math
 import pathlib
 import sys
@@ -7,7 +7,8 @@ import unittest
 import numpy as np
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from loop_window import loop_window  # noqa: E402
+from loop_window import loop_window, loop_windows  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
 
 FPS = 30
 
@@ -130,6 +131,58 @@ class LoopWindow(unittest.TestCase):
             with self.assertRaises(ValueError) as caught:
                 loop_window(bad[0], bad[1], FPS, bad[2])
             self.assertNotIn("4321", str(caught.exception))
+
+
+class StandInSkeleton:
+    """What kimodo's heading and the worker read of a skeleton: the names and parents of the real one, its Hips index
+    and the [right, left] hip joints (RightLeg, LeftLeg) that heading is taken from."""
+
+    def __init__(self, names, parents):
+        self.bone_order_names = [str(name) for name in names]
+        self.bone_index = {name: index for index, name in enumerate(self.bone_order_names)}
+        self.bone_parents = {name: (None if parent < 0 else self.bone_order_names[parent]) for name, parent in zip(self.bone_order_names, parents)}
+        self.hip_joint_idx = [self.bone_index["RightLeg"], self.bone_index["LeftLeg"]]
+
+
+class WorkerLoopWindowsTest(unittest.TestCase):
+    """loop_windows on a real generated take (the somaskel77 joints of a live Vili take, 240 frames at 30 fps), with
+    stand-ins for the model's two skeletons: the 77-joint output skeleton and the 30-joint one the model also carries."""
+
+    @classmethod
+    def setUpClass(cls):
+        data = np.load(pathlib.Path(__file__).resolve().parent / "fixtures" / "take.npz")
+        cls.joints = data["joints"]
+        cls.model = SimpleNamespace(
+            output_skeleton=StandInSkeleton(data["names77"], data["parents77"]),
+            skeleton=StandInSkeleton(data["names30"], data["parents30"]),
+            fps=FPS,
+        )
+
+    def window(self, joints):
+        (answer,) = loop_windows({"posed_joints": [joints]}, self.model)
+        return answer["first"], answer["last"]
+
+    def test_the_real_take_gets_the_window_of_its_own_heading_in_the_output_skeleton(self):
+        self.assertEqual(self.joints.shape, (240, 77, 3))
+        self.assertEqual(self.model.output_skeleton.hip_joint_idx, [72, 67])
+        self.assertEqual(self.model.skeleton.hip_joint_idx, [26, 22])
+        self.assertEqual(self.window(self.joints), (35, 222))
+        # The 30-joint skeleton's hip indices read the wrong joints of a 77-joint take and move the window.
+        wrong = SimpleNamespace(output_skeleton=self.model.skeleton, fps=FPS)
+        self.assertNotEqual(loop_windows({"posed_joints": [self.joints]}, wrong)[0]["first"], 35)
+
+    def test_turning_the_body_about_its_hips_by_a_smooth_angle_leaves_the_window(self):
+        turned = np.stack([
+            turn(self.joints[f] - self.joints[f, 0], 0.8 * math.sin(0.05 * f)) + self.joints[f, 0] for f in range(len(self.joints))
+        ]).astype(np.float32)
+        self.assertEqual(self.window(turned), (35, 222))
+
+    def test_each_sample_gets_its_own_window_with_its_costs(self):
+        still = np.repeat(self.joints[:1], 240, axis=0)
+        answers = loop_windows({"posed_joints": [self.joints, still]}, self.model)
+        self.assertEqual([(a["first"], a["last"]) for a in answers], [(35, 222), (0, 239)])
+        self.assertEqual(set(answers[0]), {"first", "last", "poseCost", "velocityCost"})
+        self.assertAlmostEqual(answers[1]["poseCost"], 0.0, places=6)
 
 
 if __name__ == "__main__":
