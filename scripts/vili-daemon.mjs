@@ -592,8 +592,9 @@ async function readInside(file, directory) {
 // the BVH and writes a private FBX in a directory made for this export alone, and the FBX is then created beside the
 // BVH exclusively, so nothing planted at either path is read, written through or replaced. The FBX counts only if
 // Blender exits 0, prints its result line and its file exists. A failure names the exit or the signal and never
-// Blender's output.
-async function exportClip(bvh, fbx, clipName, timeoutMs, artifactDir) {
+// Blender's output. A window {first, last} (BVH frame indices, last inclusive) is handed to Blender as the frame
+// range to export, in Blender's frames, which count from 1; the daemon never chooses one.
+async function exportClip(bvh, fbx, clipName, timeoutMs, artifactDir, window = null) {
   const input = await readInside(bvh, artifactDir);
   if (input === null) return { error: "fbx-export-refused" };
   guard();
@@ -606,6 +607,7 @@ async function exportClip(bvh, fbx, clipName, timeoutMs, artifactDir) {
     const run = await runBlender([
       "-b", "--factory-startup", "--python-use-system-env", "--python-exit-code", "1",
       "--python", exportScript, "--", privateBvh, privateFbx, clipName,
+      ...(window ? ["--frames", String(window.first + 1), String(window.last + 1)] : []),
     ], timeoutMs);
     let info = null;
     if (run.code === 0 && run.result !== null) {
@@ -648,8 +650,9 @@ async function sweepWork() {
 
 // Every BVH the worker listed becomes an FBX, or the job fails. A listed BVH must be a regular file inside the job's
 // artifact directory, and that is decided when its export begins (exportClip), never earlier. Sample N of several is
-// <clipName>_NN.
-async function exportListed(listed, artifactDir, clipName, timeoutMs) {
+// <clipName>_NN. With loops (the worker's answer, an array when the request asked for a loop, else undefined), sample k
+// is exported over loops[k], and a job whose answer has no usable window for a sample fails.
+async function exportListed(listed, artifactDir, clipName, timeoutMs, loops = undefined) {
   const bvhs = [];
   for (const file of Array.isArray(listed) ? listed : []) {
     if (typeof file !== "string" || !file.endsWith(".bvh")) continue;
@@ -660,7 +663,11 @@ async function exportListed(listed, artifactDir, clipName, timeoutMs) {
   const clips = [];
   for (const [index, bvh] of bvhs.entries()) {
     const name = bvhs.length === 1 ? clipName : `${clipName}_${String(index).padStart(2, "0")}`;
-    const done = await exportClip(bvh, `${bvh.slice(0, -".bvh".length)}.fbx`, name, timeoutMs, artifactDir);
+    const window = loops === undefined ? null : loops[index];
+    if (window !== null && !(Number.isInteger(window?.first) && Number.isInteger(window?.last) && window.first >= 0 && window.last > window.first)) {
+      return { clips, error: "fbx-export-failed (no loop window)" };
+    }
+    const done = await exportClip(bvh, `${bvh.slice(0, -".bvh".length)}.fbx`, name, timeoutMs, artifactDir, window);
     if (done.error) return { clips, error: done.error };
     clips.push({ ...done.clip, file: path.relative(artifactDir, done.clip.file).split(path.sep).join("/") });
   }
@@ -864,8 +871,10 @@ async function generate(request, response) {
   // One export plan: fbx implies the BVH and its standard T-pose, which the FBX is made from.
   const fbx = boolValue(body.fbx);
   const askedTpose = firstDefined(body.bvhStandardTpose, body.bvh_standard_tpose);
-  if (fbx && ((askedTpose !== undefined && !boolValue(askedTpose))
-    || (body.clipName !== undefined && !(typeof body.clipName === "string" && CLIP_NAME.test(body.clipName))))) {
+  const loop = body.loop === true;
+  if ((body.loop !== undefined && typeof body.loop !== "boolean") || (loop && !fbx)
+    || (fbx && ((askedTpose !== undefined && !boolValue(askedTpose))
+      || (body.clipName !== undefined && !(typeof body.clipName === "string" && CLIP_NAME.test(body.clipName)))))) {
     json(response, 400, { ok: false, error: "Invalid fbx request." });
     return;
   }
@@ -934,9 +943,10 @@ async function generate(request, response) {
     numSamples,
     diffusion_steps: diffusionSteps,
     numTransitionFrames: firstDefined(body.numTransitionFrames, body.num_transition_frames),
-    constraints: constraintsPath,
+    constraints: body.constraints !== undefined && typeof body.constraints !== "string" ? body.constraints : constraintsPath,
     seed,
     fbx: fbx || undefined,
+    loop: loop || undefined,
     clipName,
     cfg: body.cfg,
     cfgType: firstDefined(body.cfgType, body.cfg_type),
@@ -967,6 +977,7 @@ async function generate(request, response) {
       numTransitionFrames: firstDefined(body.numTransitionFrames, body.num_transition_frames),
       constraints: constraintsPath,
       seed,
+      loop: loop || undefined,
       cfg: body.cfg,
       cfgType: firstDefined(body.cfgType, body.cfg_type),
       cfgWeight: firstDefined(body.cfgWeight, body.cfg_weight),
@@ -993,7 +1004,7 @@ async function generate(request, response) {
   let exported = null;
   if (fbx && result.ok) {
     const timeoutMs = Math.min(EXPORT_TIMEOUT_MS, Math.max(1, Number(firstDefined(body.exportTimeoutMs, EXPORT_TIMEOUT_MS)) || EXPORT_TIMEOUT_MS));
-    exported = await exportListed(result.body?.files, artifactDir, clipName, timeoutMs);
+    exported = await exportListed(result.body?.files, artifactDir, clipName, timeoutMs, loop ? (Array.isArray(result.body?.loops) ? result.body.loops : []) : undefined);
     if (exported.error) result = { ok: false, error: exported.error, body: result.body };
   }
 

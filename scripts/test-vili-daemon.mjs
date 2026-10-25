@@ -1441,6 +1441,81 @@ test("fbx refusals happen before anything is written or spawned", async () => {
   }
 });
 
+test("loop asks for the seamless window, and the window is the FBX's frame range", async () => {
+  const daemon = await startDaemon();
+  try {
+    const constraints = [{ type: "root2d", frame_indices: [0, 10], smooth_root_2d: [[0, 0], [0, 0.5]] }];
+    const answer = await generate(daemon, exportRequest({ clipName: "walk", seed: 7, loop: true, constraints }));
+    assert.equal(answer.status, 200);
+    const job = answer.body;
+    assert.equal(job.request.loop, true);
+    assert.deepEqual(job.worker.loops, [{ first: 3, last: 223, poseCost: 0.03, velocityCost: 0.2 }]);
+    assert.deepEqual(job.request.constraints, constraints, "the record keeps inline constraints as sent");
+    assert.deepEqual(JSON.parse(readFileSync(path.join(job.artifactDir, "constraints.json"), "utf8")), constraints);
+    assert.equal(JSON.parse(readFileSync(path.join(job.artifactDir, "request.json"), "utf8")).loop, true, "the worker is asked for the loop");
+    assert.equal(job.worker.constraints, path.join(job.artifactDir, "constraints.json"), "the worker still gets the path");
+    const [run] = exportStarts(daemon);
+    assert.deepEqual(run.argv.slice(run.argv.indexOf("--") + 3), ["walk", "--frames", "4", "224"], "Blender's frames count from 1");
+    assert.deepEqual(job.export.clips.map((clip) => clip.frames), [[1, 60]], "the clip's frames are what Blender reports");
+
+    const several = await generate(daemon, exportRequest({ clipName: "pair", numSamples: 2, loop: true }));
+    assert.equal(several.status, 200);
+    assert.deepEqual(several.body.worker.loops.map((loop) => [loop.first, loop.last]), [[3, 223], [4, 224]]);
+    const frames = Object.fromEntries(exportStarts(daemon).slice(1).map((start) => {
+      const [, , clip, ...rest] = start.argv.slice(start.argv.indexOf("--") + 1);
+      return [clip, rest];
+    }));
+    assert.deepEqual(frames, { pair_00: ["--frames", "4", "224"], pair_01: ["--frames", "5", "225"] }, "each sample is exported over its own window");
+
+    const plain = await generate(daemon, exportRequest({ clipName: "plain" }));
+    assert.equal(plain.status, 200);
+    assert.equal(plain.body.worker.loops, undefined);
+    assert.equal(plain.body.request.loop, undefined);
+    assert.equal(JSON.parse(readFileSync(path.join(plain.body.artifactDir, "request.json"), "utf8")).loop, undefined);
+    assert.equal(exportStarts(daemon).at(-1).argv.at(-1), "plain", "no window, no --frames");
+    const kept = await generate(daemon, exportRequest({ constraints_path: "/some/where.json", constraints: undefined }));
+    assert.equal(kept.body.request.constraints, "/some/where.json", "a path stays a path");
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("loop is a boolean and needs fbx, refused before anything is written or spawned", async () => {
+  const daemon = await startDaemon();
+  try {
+    for (const bad of [{ fbx: false, loop: true }, { fbx: undefined, loop: true }, { loop: "yes canary" }, { loop: 1 }, { loop: null }, { loop: "true" }]) {
+      const answer = await generate(daemon, exportRequest(bad));
+      assert.equal(answer.status, 400, JSON.stringify(bad));
+      assert.deepEqual(answer.body, { ok: false, error: "Invalid fbx request." });
+      assert.ok(!answer.raw.includes("canary"), "the refusal repeated the input");
+    }
+    assert.equal(existsSync(path.join(daemon.stateRoot, "artifacts")), false, "no artifact directory was made");
+    assert.deepEqual(jobFiles(daemon), []);
+    assert.deepEqual(daemon.spawns(), [], "no worker was started");
+    assert.equal(exportStarts(daemon).length, 0);
+    assert.equal((await generate(daemon, exportRequest({ loop: false }))).status, 200, "loop false is no loop");
+    assert.equal((await generate(daemon, { prompt: "a person waves", duration: 2, loop: false })).status, 200);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("a loop request whose answer has no usable window for a sample fails without exporting that sample", async () => {
+  for (const [model, exported] of [["no-loops", 0], ["bad-loops", 0], ["short-loops", 1]]) {
+    const daemon = await startDaemon();
+    try {
+      const answer = await generate(daemon, exportRequest({ model, loop: true, numSamples: 2 }));
+      assert.equal(answer.status, 502, model);
+      assert.equal(answer.body.ok, false);
+      assert.equal(answer.body.error, "fbx-export-failed (no loop window)");
+      assert.equal(exportStarts(daemon).length, exported, `${model}: only a sample with a window is exported`);
+      assert.equal(answer.body.export.clips.length, exported);
+    } finally {
+      await daemon.stop();
+    }
+  }
+});
+
 test("the BVH is never given to Blender unless it is a regular file inside the job's directory", async () => {
   const daemon = await startDaemon();
   try {

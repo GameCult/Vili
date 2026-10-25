@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import math
 import os
 import shutil
 import sys
@@ -14,7 +15,7 @@ import torch
 from huggingface_hub.constants import HF_HOME
 
 from kimodo import DEFAULT_MODEL, load_model
-from kimodo.constraints import load_constraints_lst
+from kimodo.constraints import compute_global_heading, load_constraints_lst
 from kimodo.exports.motion_io import save_kimodo_npz
 from kimodo.meta import parse_prompts_from_meta
 from kimodo.model.load_model import TEXT_ENCODER_PRESETS
@@ -28,6 +29,7 @@ from kimodo.scripts.generate import (
 )
 from kimodo.tools import save_json, seed_everything
 
+import loop_window
 import text_encoding
 
 
@@ -184,6 +186,20 @@ def save_outputs(output, output_base, export_bvh, bvh_standard_tpose):
     return files
 
 
+def loop_windows(output):
+    """One loop window per sample, chosen from Kimodo's own posed joints (always the somaskel77 output skeleton) and the
+    heading it computes from them. Frame indices into the take, last inclusive."""
+    skeleton = model.output_skeleton
+    hips = skeleton.bone_index["Hips"]
+    windows = []
+    for joints in output["posed_joints"]:
+        heading = compute_global_heading(torch.from_numpy(joints[None]), skeleton)[0]
+        angle = torch.atan2(heading[:, 1], heading[:, 0]).numpy()
+        first, last, pose_cost, velocity_cost = loop_window.loop_window(joints, angle, model.fps, math.ceil(len(joints) / 2), hips)
+        windows.append({"first": first, "last": last, "poseCost": pose_cost, "velocityCost": velocity_cost})
+    return windows
+
+
 def save_example_dirs(output_base, texts, num_frames, num_samples, constraints_path):
     output_stem = os.path.splitext(output_base)[0].rstrip(os.sep)
     base_name = os.path.basename(output_stem)
@@ -319,6 +335,7 @@ def generate(payload):
             request_bool(payload, "bvh"),
             request_bool(payload, "bvhStandardTpose") or request_bool(payload, "bvh_standard_tpose"),
         )
+        loops = loop_windows(output) if request_bool(payload, "loop") else None
         if request_bool(payload, "saveExampleDir") or request_bool(payload, "save_example_dir"):
             files.extend(save_example_dirs(output_base, texts, num_frames, num_samples, constraints_path))
         generation_count += 1
@@ -347,6 +364,7 @@ def generate(payload):
         "constraints": constraints_path,
         "seed": seed,
         "files": files,
+        **({"loops": loops} if loops is not None else {}),
         "encoder": encoder_record,
         "worker": worker_identity,
         "timing": {
