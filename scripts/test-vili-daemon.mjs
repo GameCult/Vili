@@ -19,6 +19,9 @@ const stubBlenderPath = path.join(here, "fixtures", "stub-blender.mjs");
 const exportScriptPath = path.join(here, "bvh-to-fbx.py");
 const fakeIdunnEntry = path.join(here, "fixtures", "fake-idunn-entry.mjs");
 const THREADS = 5;
+// The stub Blender is executed, and the recipe's runner mounts /tmp noexec (and the root read-only), so it cannot live
+// there. It lives under the checkout's gitignored .vili, which the runner's workspace leaves writable.
+const execScratch = path.join(here, "..", ".vili", "test-scratch");
 
 async function until(condition, what, seconds = 15) {
   const deadline = Date.now() + seconds * 1000;
@@ -65,7 +68,8 @@ async function startDaemon({
   if (threads !== null) settings.threads = threads;
   // Blender is a copy of the stub in a directory of its own (the stub logs its starts beside itself): "stub" is
   // ready, "broken" fails its version probe, "missing" is a path with nothing there, null is unconfigured.
-  const blenderDir = mkdtempSync(path.join(os.tmpdir(), "vili-blender-"));
+  mkdirSync(execScratch, { recursive: true });
+  const blenderDir = mkdtempSync(path.join(execScratch, "blender-"));
   const blenderPath = blender === null ? null : path.join(blenderDir, { stub: "blender", broken: "blender-broken", missing: "absent" }[blender]);
   if (blender === "stub" || blender === "broken") {
     copyFileSync(stubBlenderPath, blenderPath);
