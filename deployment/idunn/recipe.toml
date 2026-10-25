@@ -3,7 +3,7 @@ target = "vili"
 source_stamp_environment = "VILI_BUILD_COMMIT"
 required_gitlinks = ["vendor/CultLib", "vendor/kimodo", "vendor/SOMA-X"]
 
-# The one external input: a relocatable CPython. The locked site-packages are installed into this tree itself: a copied
+# External inputs: a relocatable CPython, then Blender and the libraries it loads. The locked site-packages are installed into this tree itself: a copied
 # environment would carry an absolute interpreter link and a recorded build path, and the seal refuses both.
 [[external_inputs]]
 id = "cpython"
@@ -11,6 +11,135 @@ url = "https://github.com/astral-sh/python-build-standalone/releases/download/20
 sha256 = "5ff9f0602ce964a529ed1e8555d3abab6341926d724402ba9a15e9e877191124"
 runner = "python-build"
 destination = "release/cpython.tar.gz"
+
+# Blender 5.2.2 LTS, unpacked beside the interpreter. The tree is sealed whole; the daemon runs it with
+# LD_LIBRARY_PATH=blender/lib (scripts/vili-daemon.mjs exportEnv).
+[[external_inputs]]
+id = "blender-linux-x64"
+url = "https://download.blender.org/release/Blender5.2/blender-5.2.2-linux-x64.tar.xz"
+sha256 = "84098912789dc450e95697c4184fb8a90acbe5111c2ba4aede3fecb57806a168"
+runner = "python-build"
+destination = "release/blender.tar.xz"
+
+# The sixteen Debian bookworm packages whose shared libraries Blender loads and its tree does not carry: libGL and the
+# X client libraries it reaches (libx11-6, libxext6, libxcb1, libxau6, libxdmcp6, libbsd0 and libmd0 are the transitive
+# ones a host only has when something like xauth installed them). Their usr/lib/x86_64-linux-gnu/*.so* go into
+# blender/lib; nothing is installed on the host and the host supplies only the libc family, libgcc_s, libstdc++ and
+# libuuid1 (motion-pipeline:ruling:blender-libs-bundled-in-release, motion-pipeline:ruling:blender-x-libs-bundled-in-release;
+# proved by scripts/verify-blender-selfcontained.sh). One snapshot.debian.org
+# timestamp, so the bytes are immutable; each sha256 is the package's own.
+
+[[external_inputs]]
+id = "deb-libxrender1"
+url = "https://snapshot.debian.org/archive/debian/20260301T000000Z/pool/main/libx/libxrender/libxrender1_0.9.10-1.1_amd64.deb"
+sha256 = "b2a6d160578f359220101947c8d67059b44704a251e688de1d0b744fefedfd1a"
+runner = "python-build"
+destination = "release/deb-libxrender1.deb"
+
+[[external_inputs]]
+id = "deb-libxfixes3"
+url = "https://snapshot.debian.org/archive/debian/20260301T000000Z/pool/main/libx/libxfixes/libxfixes3_6.0.0-2_amd64.deb"
+sha256 = "1cd616396ff2ecae77e6e8b5b7695d414f0146de2d147837a2a02165f99e1a2c"
+runner = "python-build"
+destination = "release/deb-libxfixes3.deb"
+
+[[external_inputs]]
+id = "deb-libxi6"
+url = "https://snapshot.debian.org/archive/debian/20260301T000000Z/pool/main/libx/libxi/libxi6_1.8-1+b1_amd64.deb"
+sha256 = "6c2fb5f241b311788990122c6e693915867cd8ed9d6da2e3524aec7ed3cdb4c0"
+runner = "python-build"
+destination = "release/deb-libxi6.deb"
+
+[[external_inputs]]
+id = "deb-libxkbcommon0"
+url = "https://snapshot.debian.org/archive/debian/20260301T000000Z/pool/main/libx/libxkbcommon/libxkbcommon0_1.5.0-1_amd64.deb"
+sha256 = "e3fe045b9a33a101de1c5a912a4a10928db055c3f68930f47eccbb44d7c7d54e"
+runner = "python-build"
+destination = "release/deb-libxkbcommon0.deb"
+
+[[external_inputs]]
+id = "deb-libsm6"
+url = "https://snapshot.debian.org/archive/debian/20260301T000000Z/pool/main/libs/libsm/libsm6_1.2.3-1_amd64.deb"
+sha256 = "22a420890489023346f30fecef14ea900a0788e7bf959ef826aabb83944fccfb"
+runner = "python-build"
+destination = "release/deb-libsm6.deb"
+
+[[external_inputs]]
+id = "deb-libice6"
+url = "https://snapshot.debian.org/archive/debian/20260301T000000Z/pool/main/libi/libice/libice6_1.0.10-1_amd64.deb"
+sha256 = "452796e565c9d42386bd59990000ae9c37d85e142e00ee2b14df0787e2bbf970"
+runner = "python-build"
+destination = "release/deb-libice6.deb"
+
+[[external_inputs]]
+id = "deb-libgl1"
+url = "https://snapshot.debian.org/archive/debian/20260301T000000Z/pool/main/libg/libglvnd/libgl1_1.6.0-1_amd64.deb"
+sha256 = "6f89b1702c48e9a2437bb3c1ffac8e1ab2d828fc28b3d14b2eecd4cc19b2c790"
+runner = "python-build"
+destination = "release/deb-libgl1.deb"
+
+[[external_inputs]]
+id = "deb-libglx0"
+url = "https://snapshot.debian.org/archive/debian/20260301T000000Z/pool/main/libg/libglvnd/libglx0_1.6.0-1_amd64.deb"
+sha256 = "95f568df73dedf43ae66834a75502112e0d4f3ad7124f3dbfa790b739383b896"
+runner = "python-build"
+destination = "release/deb-libglx0.deb"
+
+[[external_inputs]]
+id = "deb-libglvnd0"
+url = "https://snapshot.debian.org/archive/debian/20260301T000000Z/pool/main/libg/libglvnd/libglvnd0_1.6.0-1_amd64.deb"
+sha256 = "b6da5b153dd62d8b5e5fbe25242db1fc05c068707c365db49abda8c2427c75f8"
+runner = "python-build"
+destination = "release/deb-libglvnd0.deb"
+
+[[external_inputs]]
+id = "deb-libx11-6"
+url = "https://snapshot.debian.org/archive/debian/20260301T000000Z/pool/main/libx/libx11/libx11-6_1.8.4-2+deb12u2_amd64.deb"
+sha256 = "d88c973e79fd9b65838d77624142952757e47a6eb1a58602acf0911cf35989f4"
+runner = "python-build"
+destination = "release/deb-libx11-6.deb"
+
+[[external_inputs]]
+id = "deb-libxext6"
+url = "https://snapshot.debian.org/archive/debian/20260301T000000Z/pool/main/libx/libxext/libxext6_1.3.4-1+b1_amd64.deb"
+sha256 = "504b7be9d7df4f6f4519e8dd4d6f9d03a9fb911a78530fa23a692fba3058cba6"
+runner = "python-build"
+destination = "release/deb-libxext6.deb"
+
+[[external_inputs]]
+id = "deb-libxcb1"
+url = "https://snapshot.debian.org/archive/debian/20260301T000000Z/pool/main/libx/libxcb/libxcb1_1.15-1_amd64.deb"
+sha256 = "fdc61332a3892168f3cc9cfa1fe9cf11a91dc3e0acacbc47cbc50ebaa234cc71"
+runner = "python-build"
+destination = "release/deb-libxcb1.deb"
+
+[[external_inputs]]
+id = "deb-libxau6"
+url = "https://snapshot.debian.org/archive/debian/20260301T000000Z/pool/main/libx/libxau/libxau6_1.0.9-1_amd64.deb"
+sha256 = "679db1c4579ec7c61079adeaae8528adeb2e4bf5465baa6c56233b995d714750"
+runner = "python-build"
+destination = "release/deb-libxau6.deb"
+
+[[external_inputs]]
+id = "deb-libxdmcp6"
+url = "https://snapshot.debian.org/archive/debian/20260301T000000Z/pool/main/libx/libxdmcp/libxdmcp6_1.1.2-3_amd64.deb"
+sha256 = "ecb8536f5fb34543b55bb9dc5f5b14c9dbb4150a7bddb3f2287b7cab6e9d25ef"
+runner = "python-build"
+destination = "release/deb-libxdmcp6.deb"
+
+[[external_inputs]]
+id = "deb-libbsd0"
+url = "https://snapshot.debian.org/archive/debian/20260301T000000Z/pool/main/libb/libbsd/libbsd0_0.11.7-2_amd64.deb"
+sha256 = "bb31cc8b40f962a85b2cec970f7f79cc704a1ae4bad24257a822055404b2c60b"
+runner = "python-build"
+destination = "release/deb-libbsd0.deb"
+
+[[external_inputs]]
+id = "deb-libmd0"
+url = "https://snapshot.debian.org/archive/debian/20260301T000000Z/pool/main/libm/libmd/libmd0_1.0.4-2_amd64.deb"
+sha256 = "03539fd30c509e27101d13a56e52eda9062bdf1aefe337c07ab56def25a13eab"
+runner = "python-build"
+destination = "release/deb-libmd0.deb"
 
 # ---- node-build: the daemon, the Idunn entry and its dependencies
 
@@ -68,6 +197,37 @@ runner = "python-build"
 argv = ["tar", "-xzf", "release/cpython.tar.gz", "-C", "release"]
 
 [[steps]]
+id = "unpack-blender"
+phase = "prepare"
+runner = "python-build"
+argv = ["tar", "-xJf", "release/blender.tar.xz", "-C", "release", "--transform", "s,^blender-5.2.2-linux-x64,blender,"]
+
+[[steps]]
+id = "unpack-blender-libs"
+phase = "prepare"
+runner = "python-build"
+required_environment = ["PATH"]
+argv = [
+  "python3.12", "deployment/idunn/unpack-debs.py", "release/blender/lib",
+  "release/deb-libxrender1.deb",
+  "release/deb-libxfixes3.deb",
+  "release/deb-libxi6.deb",
+  "release/deb-libxkbcommon0.deb",
+  "release/deb-libsm6.deb",
+  "release/deb-libice6.deb",
+  "release/deb-libgl1.deb",
+  "release/deb-libglx0.deb",
+  "release/deb-libglvnd0.deb",
+  "release/deb-libx11-6.deb",
+  "release/deb-libxext6.deb",
+  "release/deb-libxcb1.deb",
+  "release/deb-libxau6.deb",
+  "release/deb-libxdmcp6.deb",
+  "release/deb-libbsd0.deb",
+  "release/deb-libmd0.deb",
+]
+
+[[steps]]
 id = "install-build-tools"
 phase = "prepare"
 runner = "python-build"
@@ -93,7 +253,7 @@ id = "test-worker"
 phase = "test"
 runner = "python-build"
 working_directory = "."
-required_environment = ["HOME", "TMPDIR", "PYTHONPATH", "PATH"]
+required_environment = ["HOME", "TMPDIR", "PYTHONPATH", "PATH", "VILI_BLENDER"]
 argv = ["python3.12", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_*.py"]
 
 # Every module the worker and the encoder child import at top level, kimodo.scripts.generate included.
@@ -114,7 +274,7 @@ runner = "python-build"
 required_environment = ["PATH"]
 argv = ["python3.12", "-m", "compileall", "-q", "-j", "4", "--invalidation-mode", "unchecked-hash", "release/python/lib/python3.12"]
 
-# ---- the sealed release: node, vili, python
+# ---- the sealed release: node, vili, python, blender
 
 [[artifacts]]
 id = "node"
@@ -139,9 +299,17 @@ source = "release/python"
 destination = "python"
 executable_members = ["bin/python3.12"]
 
+[[artifacts]]
+id = "blender"
+source_kind = "runner-output"
+runner = "python-build"
+source = "release/blender"
+destination = "blender"
+executable_members = ["blender"]
+
 [service]
 executable_artifact = "node"
-required_adjacent_artifacts = ["vili", "python"]
+required_adjacent_artifacts = ["vili", "python", "blender"]
 arguments = [
   { kind = "literal", value = "vili/scripts/idunn-entry.mjs" },
   { kind = "literal", value = "--state-root" },
@@ -187,7 +355,7 @@ startup = "create-or-open-after-write-lease"
 id = "jobs"
 relative_path = "jobs"
 kind = "external-directory"
-schema = "gamecult.vili.motion_job.v0"
+schema = "gamecult.vili.motion_job.v1"
 writer = "process-bound-single-writer"
 recovery = "preserve"
 startup = "create-or-open-after-write-lease"
@@ -199,6 +367,15 @@ kind = "external-directory"
 schema = "gamecult.vili.motion_artifact.v0"
 writer = "process-bound-single-writer"
 recovery = "preserve"
+startup = "create-or-open-after-write-lease"
+
+[[state.slots]]
+id = "work"
+relative_path = "work"
+kind = "external-directory"
+schema = "gamecult.vili.export_scratch.v0"
+writer = "process-bound-single-writer"
+recovery = "rebuildable"
 startup = "create-or-open-after-write-lease"
 
 [[state.slots]]
