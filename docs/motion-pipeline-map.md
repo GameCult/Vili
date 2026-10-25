@@ -30,6 +30,27 @@ out) and a 1 GB mini project with no Library, both in the session scratchpad. No
 | Foot contact and slide | The method was `AnimationDuelSceneTests.SoleStride`'s skinned-sole contact (within 12 percent of the foot's height range), with the duelist's Walk state overridden by each clip at 60 Hz, giving the mean slide over contact frames in SOMA m/s (units divided by 7.354). The current LHMP Walk in place at its stride (11.24 u/s) slides 0.203. The celebrate clip slides 0.907 with root motion and 0.389 with root motion plus Foot IK on the state; in place it slides 0.595 at its sole stride (5.90 u/s) and 0.606 at the speed derived from `averageSpeed` (6.34 u/s), and 0.716 in place with Foot IK. The mope clip slides 1.175 with root motion, 0.672 with root motion plus Foot IK, and 0.929 and 0.691 in place without and with IK, at a stride of 4.25 to 6.80. On SOMA's own avatar (toe-base joints), the celebrate clip slides 0.065 with root motion and 0.50 in place; the mope clip slides 0.42 either way, which is Kimodo's own shuffle. |
 | Root speed profile | Celebrate root velocity on LHMP runs from 0.85 to 7.46 to 10.76 u/s (p10, p50, p90), because the gait lurches with the fist pumps. Mope's runs from 6.32 to 6.87 to 7.33, which is steady. Over 2.97 s, root motion carries the duelist 18.66 u (celebrate) and 20.28 u (mope): 14 and 15 percent of the 136 u exit. |
 
+### The RPS slot clips against live takes, 2026-10-25
+
+Imagination (imagination-rps-clips, session sp-reentry-2026-10-21), for
+`motion-pipeline:cut_spec:cut-rps-slot-clips.r1` at StreamPixels main `84d7499`. Takes came from the live unit
+(release `5bcd6700...`, 8 threads) by `POST /motion/generate` with `fbx: true`, a fixed `clipName` per slot, a seed and a
+duration, and `GET /motion/artifacts/<jobId>/motion.fbx`: 19 takes, 21 to 80 s wall each. Each was imported through the
+avatar cut's hook in a lean copy of `apps/overlay-unity` (Library caches left out) and played on the scene's
+`Challenger Character` (LHMP, 7.354 u per SOMA m) at 60 Hz, Unity 2021.3.45f2 batchmode with graphics. Slide is the
+`SoleStride` stance rule (sole within 12 percent of its height range) applied to the sole's world horizontal speed while the
+body is placed by its own root delta, mean and median over stance frames, in SOMA m/s. The takes and their records are
+kept in the session scratchpad folder `imagination-rps-clips\takes`. No repo was changed.
+
+| Probe | Result |
+|---|---|
+| Root delta with root motion off | With `applyRootMotion` false and no `OnAnimatorMove` handler, `animator.deltaPosition` reads 0 every frame (two clips, 960 frames each). With an `[ExecuteAlways]` `OnAnimatorMove` handler on the duelist it reads the clip's travel (148.48 u over 16 s, equal to the handler's sum), in EditMode under `Animator.Update`, and the transform moves 0.0000. So the beat needs a tap on the duelist's GameObject; `AnimationDuel` cannot read the delta itself. |
+| Countdown, 7 takes, 4 s | Prompt a, "A person stands still, holds out the open left hand palm up in front of the chest, and pounds the right fist down into the left palm three times, then holds the fist on the palm.", seeds 1 to 3: the hand-curve distance stays at 0.71 m or more except in the first and last 0.25 s (0.43 and 0.48 m at most there); the hands wave apart. Prompt c, "A person raises the right fist and brings it down hard onto the open left palm, three times in a row, then keeps the fist resting on the palm.", seeds 1 and 2: the same, minima 0.67 to 1.08 m. Prompt b, "A person counts one, two, three by bumping the right fist into the open left palm three times at a steady beat, and keeps the fist pressed in the palm after the third bump.": seed 2 meets once (1.450 s, 0.181 m); seed 1 (job `vili-1792907818564-564416e8`, sha256 `01a37f765a0e8627717d64694e08a594f1c44d29f87b7bdaa7cb77645958fd41`) has three contacts by the test's rule, at 0.958, 1.208 and 1.775 s (0.155, 0.160, 0.175 m), but the distance between them peaks at only 0.171 and 0.176 m: one press held from 0.96 to 1.78 s, not three pounds. On the duelist the retargeted wrists at those frames are 2.56 to 2.84 u apart (arm 3.67 u). |
+| Raised arms and the icon | Across all seven countdown takes the higher hand stays 6.4 to 8.8 u below the head's top. A weapon pass at the held third hit was run but is not usable: renderer bounds of freshly instantiated weapon prefabs read stale in batchmode (223 of 588 mounts at one identical +103.8 u). |
+| Winner, 6 takes, 8 s | "A person walks forward briskly while celebrating, pumping both fists in the air." seeds 1 to 3: 0.26, 0.37, 0.59 m/s. "A happy person struts forward quickly with a victorious bounce, raising both arms in triumph as they walk." seeds 1 to 3: 0.60, 0.66, 0.95 m/s. Best by pace and slide: seed 3 (job `vili-1792908162029-5dea0ac1`, sha256 `bd579f0b54621ca698e7c3b5efad5a54d260d5260118b8e095eae02dec298c09`): 7.02 u/s, 90.9 u by 12.17 s, root speed p10/p50/p90 -0.27/8.70/13.20 u/s, lateral drift 11.6 u in 16 s; slide with Foot IK mean 0.521 median 0.086, without IK 2.087 and 1.479; with loop pose and IK 0.773 and 0.100; seam pose cost 0.054 (muscle RMS plus step RMS, 0 to 7.97 s; no better window). |
+| Loser, 6 takes, 8 s | "A person walks forward briskly but dejectedly, head hanging down and shoulders slumped." seeds 1 to 3: 1.26, 1.15, 1.44 m/s. "A disappointed person walks away quickly, head down, shaking their head, arms hanging limply." seeds 1 to 3 turn round and walk backward in the clip's frame (-0.93 to -1.08 m/s): unusable. Best: seed 3 of the first (job `vili-1792908307335-991264b1`, sha256 `009b7240f92f14c27a941d547572ccd56163d22ee11cd6736f3429d545fe5944`): 10.60 u/s, 136.3 u in 11.40 s, lateral 20.9 u in 16 s; slide with loop pose and IK mean 0.557 median 0.143 (seam frames 0.075), with IK only 0.982 and 0.184 (seams 0.646), without IK 2.357 and 2.013; seam cost 0.033, the lowest of all takes. |
+| Timing | The countdown slot is unchanged, so `RpsRoundTimeoutSeconds` (8) holds as before (5 + 1.5 + 0.4). Staging: run-in up to about 4.1 s for the widest name plus an exit of 136 to 198 u at 10.6 to 11.2 u/s (12 to 18.7 s), with the 3 s outro gone: at most about 23 s against `RpsStagingTimeoutSeconds` 40. |
+
 ### FBX export on Yggdrasil, 2026-10-24
 
 Imagination (imagination-vili-fbx-r3, session sp-reentry-2026-10-21), for
@@ -509,6 +530,28 @@ duel and placed by the beat. The Animator should not move the transform, and the
   walk (0.39 against 0.20 m/s). The mope take slides 0.42 m/s on its own avatar before any retarget. Takes for the
   slot clips should be chosen on measured slide, by the `SoleStride` rule, across seeds.
 
+### The RPS slot clips, r1
+
+- **The exit reads the clip; the beat still places.** `rps-duelists-exit-celebrating-moping` makes the Winner and Loser
+  motions the exit, so the plain walk, its `WalkSpeed`, the `Walk` slot and state and the 3 s outro all lose their
+  reason to exist and are deleted. Each tick the beat asks how far each side's clip carried it along its way out
+  (`IRpsDuelWorld.Travelled`), adds that to the side's own distance and places it on its line. The Animator never moves
+  a duelist (`applyRootMotion` stays false); its delta reaches the beat through a tap on the duelist, because the probe
+  shows the delta is 0 without an `OnAnimatorMove` handler. A lerp at a constant would slide the lurching celebrate gait
+  (its root speed spans -0.27 to 13.2 u/s).
+- **Loop, not length.** Kimodo's takes are 8 s and the exit is 12 to 19 s, so the exit clips loop. Loop pose is on for
+  both: it cut the loser's seam slide from 0.646 to 0.075 m/s and cost the winner little in median (0.086 to 0.100).
+  Which clips loop is a committed set inside the SOMA hook, so the hook stays the one writer of import settings.
+- **Pace is a fork for the winner only.** The mope take meets the ruled pace on its own (1.44 m/s, 11.4 s). No
+  celebrating take walked faster than 0.95 m/s, so the spec plays it at 1.6 (`motion-pipeline:question:rps-winner-pace`).
+- **The countdown is not in this cut.** No take shows three distinct hits; the one that passes the contact rule is a held
+  press (`motion-pipeline:question:rps-countdown-take`). The exits do not depend on it, so they go first and the countdown
+  waits for a constrained take. `rps-icon-offhead-gear-raised-arm` stays with the countdown: the hands stay 6.4 u or more
+  below the head's top in every take, but the weapon reach is unmeasured.
+- **No exit ceiling.** A clip with no forward travel would never finish the exit. That is an asset fault, so the editor
+  test pins it (looping, forward `averageSpeed`), and the director's staging timeout remains the runtime guard. A
+  ceiling in the beat would pool a duelist in view and add a second rule for when the exit ends.
+
 ### Earlier decisions
 
 - **Blender stays; the FBX SDK does not come in.** Skipping Blender would save
@@ -540,9 +583,8 @@ and `cut-soma-humanoid-avatar` r3 is mapped (its spec is in the mind). One line 
 
 - **Raven teardown** (the list under "What retires on Raven"), and Self supersedes the Raven
   rulings with it. Waits on nothing now that admission is live.
-- **RPS slot clips** (`motion-pipeline:follow_up:rps-slot-clips-from-vili`; Winner and Loser travel,
-  `rps:ruling:rps-duelists-exit-celebrating-moping`; travel as under "The avatar cut, r3"). Waits on the avatar cut
-  and `motion-pipeline:question:rps-exit-pace`.
+- **RPS slot clips**: the exits are mapped (`motion-pipeline:cut_spec:cut-rps-slot-clips.r1`, blocked on
+  `rps-countdown-take` and `rps-winner-pace`). The countdown waits for a constrained take.
 - **Vili intake closed** (`motion-pipeline:follow_up:vili-worker-intake-local-callers` and
   `vili-caller-read-paths-2`). Independent of the FBX cut.
 - **Vili publishes to Odin over CultMesh**, as StreamPixels' service does. Waits on nothing.
