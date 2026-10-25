@@ -1504,6 +1504,49 @@ test("constraints given twice are refused before anything is written or spawned"
   }
 });
 
+test("past 100 samples each clip is exported over the window of its own sample", async () => {
+  const daemon = await startDaemon();
+  try {
+    const answer = await generate(daemon, exportRequest({ clipName: "m", loop: true, numSamples: 101, exportTimeoutMs: 60000 }));
+    assert.equal(answer.status, 200);
+    const starts = exportStarts(daemon);
+    assert.equal(answer.body.export.clips.length, 101);
+    answer.body.export.clips.forEach((clip, i) => {
+      const sample = Number(/motion_(\d+)\.fbx$/.exec(clip.file)[1]);
+      const argv = starts[i].argv.slice(starts[i].argv.indexOf("--") + 1);
+      assert.equal(argv[2], `m_${String(sample).padStart(2, "0")}`, `${clip.file} is named for its sample`);
+      assert.deepEqual(argv.slice(3), ["--frames", String(4 + sample), String(224 + sample)], `${clip.file} gets its own sample's window`);
+    });
+    assert.ok(answer.body.export.clips.some((clip) => clip.file.endsWith("motion_100.fbx")));
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("constraints given twice are refused before anything is written or spawned", async () => {
+  const daemon = await startDaemon();
+  try {
+    const inline = [{ type: "root2d" }];
+    for (const bad of [
+      { constraints: inline, constraints_path: "/canary/a.json" },
+      { constraints: inline, constraintsPath: "/canary/a.json" },
+      { constraints: "/canary/a.json", constraints_path: "/canary/b.json" },
+      { constraints_path: "/canary/a.json", constraintsPath: "/canary/b.json" },
+    ]) {
+      const answer = await generate(daemon, exportRequest(bad));
+      assert.equal(answer.status, 400, JSON.stringify(bad));
+      assert.deepEqual(answer.body, { ok: false, error: "Invalid constraints request." });
+      assert.ok(!answer.raw.includes("canary"), "the refusal repeated the input");
+    }
+    assert.equal(existsSync(path.join(daemon.stateRoot, "artifacts")), false, "no artifact directory was made");
+    assert.deepEqual(jobFiles(daemon), []);
+    assert.deepEqual(daemon.spawns(), [], "no worker was started");
+    assert.equal((await generate(daemon, exportRequest({ constraints_path: "/some/where.json" }))).status, 200, "one input is fine");
+  } finally {
+    await daemon.stop();
+  }
+});
+
 test("loop is a boolean and needs fbx, refused before anything is written or spawned", async () => {
   const daemon = await startDaemon();
   try {

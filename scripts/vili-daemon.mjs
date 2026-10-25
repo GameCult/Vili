@@ -650,8 +650,8 @@ async function sweepWork() {
 
 // Every BVH the worker listed becomes an FBX, or the job fails. A listed BVH must be a regular file inside the job's
 // artifact directory, and that is decided when its export begins (exportClip), never earlier. Sample N of several is
-// <clipName>_NN. With loops (the worker's answer, an array when the request asked for a loop, else undefined), sample k
-// is exported over loops[k], and a job whose answer has no usable window for a sample fails.
+// <clipName>_NN, N being its own index. With loops (the worker's answer, an array when the request asked for a loop,
+// else undefined), sample k is exported over loops[k], and a job whose answer has no usable window for a sample fails.
 async function exportListed(listed, artifactDir, clipName, timeoutMs, loops = undefined) {
   const bvhs = [];
   for (const file of Array.isArray(listed) ? listed : []) {
@@ -659,9 +659,13 @@ async function exportListed(listed, artifactDir, clipName, timeoutMs, loops = un
     bvhs.push(path.resolve(artifactDir, file));
   }
   if (bvhs.length === 0) return { clips: [], error: "fbx-export-failed (no bvh)" };
-  bvhs.sort();
+  // A sample's own index is in its file name (motion_NN.bvh, more digits past 99), so the order and the window come
+  // from that number and never from sorting the names as text.
+  const sampleOf = (bvh) => Number(/_(\d+)\.bvh$/.exec(bvh)?.[1] ?? 0);
+  bvhs.sort((a, b) => sampleOf(a) - sampleOf(b) || (a < b ? -1 : a > b ? 1 : 0));
   const clips = [];
-  for (const [index, bvh] of bvhs.entries()) {
+  for (const bvh of bvhs) {
+    const index = sampleOf(bvh);
     const name = bvhs.length === 1 ? clipName : `${clipName}_${String(index).padStart(2, "0")}`;
     const window = loops === undefined ? null : loops[index];
     if (window !== null && !(Number.isInteger(window?.first) && Number.isInteger(window?.last) && window.first >= 0 && window.last > window.first)) {
