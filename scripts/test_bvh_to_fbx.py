@@ -242,14 +242,16 @@ class BvhToFbx(unittest.TestCase):
 
     def test_frames_outside_the_take_or_malformed_exit_without_a_file(self):
         bvh = self.walk("short", 31)
-        for index, (frames, exit_code) in enumerate((
-            (("0", "10"), 4), (("5", "32"), 4), (("10", "10"), 4), (("20", "10"), 4),
-            (("5",), 3), (("a", "9"), 3), (("-1", "9"), 3),
+        for index, (arguments, exit_code) in enumerate((
+            (("--frames", "0", "10"), 4), (("--frames", "5", "32"), 4), (("--frames", "10", "10"), 4),
+            (("--frames", "20", "10"), 4),
+            (("--frames", "5"), 3), (("--frames", "a", "9"), 3), (("--frames", "-1", "9"), 3),
+            (("--frames", "4", "20", "9"), 3), (("--range", "4", "20"), 3), (("4", "20"), 3),
         )):
             fbx = self.dir / f"refused{index}.fbx"
-            run = blender("--python", str(SCRIPT), "--", str(bvh), str(fbx), "refused", "--frames", *frames)
-            self.assertEqual(run.returncode, exit_code, frames)
-            self.assertFalse(fbx.exists(), frames)
+            run = blender("--python", str(SCRIPT), "--", str(bvh), str(fbx), "refused", *arguments)
+            self.assertEqual(run.returncode, exit_code, arguments)
+            self.assertFalse(fbx.exists(), arguments)
 
 
 if __name__ == "__main__":

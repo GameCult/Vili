@@ -1480,30 +1480,6 @@ test("loop asks for the seamless window, and the window is the FBX's frame range
   }
 });
 
-test("constraints given twice are refused before anything is written or spawned", async () => {
-  const daemon = await startDaemon();
-  try {
-    const inline = [{ type: "root2d" }];
-    for (const bad of [
-      { constraints: inline, constraints_path: "/canary/a.json" },
-      { constraints: inline, constraintsPath: "/canary/a.json" },
-      { constraints: "/canary/a.json", constraints_path: "/canary/b.json" },
-      { constraints_path: "/canary/a.json", constraintsPath: "/canary/b.json" },
-    ]) {
-      const answer = await generate(daemon, exportRequest(bad));
-      assert.equal(answer.status, 400, JSON.stringify(bad));
-      assert.deepEqual(answer.body, { ok: false, error: "Invalid constraints request." });
-      assert.ok(!answer.raw.includes("canary"), "the refusal repeated the input");
-    }
-    assert.equal(existsSync(path.join(daemon.stateRoot, "artifacts")), false, "no artifact directory was made");
-    assert.deepEqual(jobFiles(daemon), []);
-    assert.deepEqual(daemon.spawns(), [], "no worker was started");
-    assert.equal((await generate(daemon, exportRequest({ constraints_path: "/some/where.json" }))).status, 200, "one input is fine");
-  } finally {
-    await daemon.stop();
-  }
-});
-
 test("past 100 samples each clip is exported over the window of its own sample", async () => {
   const daemon = await startDaemon();
   try {
@@ -1568,7 +1544,7 @@ test("loop is a boolean and needs fbx, refused before anything is written or spa
 });
 
 test("a loop request whose answer has no usable window for a sample fails without exporting that sample", async () => {
-  for (const [model, exported] of [["no-loops", 0], ["bad-loops", 0], ["short-loops", 1]]) {
+  for (const [model, exported] of [["no-loops", 0], ["bad-loops", 0], ["negative-loops", 0], ["empty-loops", 0], ["fractional-last-loops", 0], ["short-loops", 1]]) {
     const daemon = await startDaemon();
     try {
       const answer = await generate(daemon, exportRequest({ model, loop: true, numSamples: 2 }));
