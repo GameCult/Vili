@@ -887,6 +887,13 @@ async function generate(request, response) {
     bvhStandardTpose: fbx || boolValue(askedTpose),
   };
 
+  // One way to give constraints: the worker reads exactly one path, so two inputs would leave the record naming
+  // constraints that did not make the clip.
+  if ([body.constraints, body.constraints_path, body.constraintsPath].filter((given) => given !== undefined).length > 1) {
+    json(response, 400, { ok: false, error: "Invalid constraints request." });
+    return;
+  }
+
   const bodyMeta = typeof body.meta === "object" && body.meta ? body.meta : {};
   const askedSeed = firstDefined(body.seed, bodyMeta.seed);
   if (askedSeed !== undefined && !(Number.isInteger(askedSeed) && askedSeed >= 0 && askedSeed < SEED_LIMIT)) {
