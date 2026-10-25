@@ -7,6 +7,29 @@ cuts not yet mapped. The target's rationale is `docs/motion-pipeline-target.md`.
 
 ## Body facts
 
+### The SOMA avatar against the live export, 2026-10-25
+
+Imagination (imagination-soma-avatar-r3, session sp-reentry-2026-10-21), for
+`motion-pipeline:cut_spec:cut-soma-humanoid-avatar.r3` at StreamPixels main `f3280e0`. The live unit is release
+`5bcd6700...` from Vili main `51eb113`, reached at `http://10.77.0.1:8824` over WireGuard; its `/health` reports
+Blender 5.2.2 LTS and 8 threads. Unity ran on Starfire (2021.3.45f2, batchmode with graphics, one job at a time,
+waiting out Soul's runs on `F:\ws\sp-a3b-r7`) in a lean copy of `apps/overlay-unity` (5.5 GB, Library caches left
+out) and a 1 GB mini project with no Library, both in the session scratchpad. No repo was changed.
+
+| Probe | Result |
+|---|---|
+| Rest FBX | `POST /motion/rest-fbx` twice (jobs `rest-1792894213349-4a1879dc`, `rest-1792897207052-c83d9a2d`): `SOMA77_Rest.fbx` 457,852 bytes, sha256 `3a608c93767696220d95534ec6c3b2a619419a13424b71b2af542be43de12f3a` both times. The route serves the FBX only; `SOMA77_Rest.bvh` is a 404. |
+| Motion FBX | `POST /motion/generate` with `{"prompt":"A person walks forward happily, pumping both fists in the air to celebrate.","duration":3,"seed":7,"fbx":true,"clipName":...}` took 60 s wall. Three runs gave one BVH (`e2d29634...`, the same bytes as the 2026-10-24 probe) and NPZ (`bf7def08...`). With `clipName` `fixture-celebrate-walk` (job `vili-1792897178490-8de9b8cc`) the FBX is 949,468 bytes, sha256 `e362ad34c0bfae2a4bfcdb41c15783d191c35c4e736d598c6328497efe2e7d3f`. A mope walk ('A person walks forward slowly and sadly, head hanging down and shoulders slumped.', 3 s, seed 7, `probe-mope`) was generated for comparison. |
+| Humanoid validation | `ApplyToRest` (table and skeleton set by an editor method, then `SaveAndReimport`): `isValid True`, `isHuman True`, 55 human bones, 79 skeleton entries, `humanScale 0.991`. Hips y 1.000, Head y 1.598, toe 0.011, root scale 1. |
+| Finger map | `LeftHandIndex1` unmapped, `LeftHandIndex2 -> Left Index Proximal`, `Index4 -> Distal`, `Thumb1 -> Thumb Proximal`, `RightHandPinky2 -> Right Little Proximal`; `Chest -> UpperChest`; `Neck2` and `Root` unmapped. The table fixes the auto-map's off-by-one. |
+| T-pose | Upper arm and forearm directions are (-1, 0, 0) and (1, 0, 0), elevation 0.0 degrees. Thigh is 1.1 degrees off vertical and shin 4.7. Unity accepts it with no Enforce T-Pose: no correction. |
+| Reproducing the `.meta` from code | From a Generic import, the first `ApplyToRest` writes 33,313 bytes and the second 33,321; the third equals the second. The two passes differ only in the last float digits of eight skeleton rotations (`z: 0` against `z: -0`, `0.7071068` against `0.70710677`), because the first pass reads the transforms of the Generic import and the second those of the Humanoid one. A fresh copy driven to the fixed point equals the committed `.meta` except its `guid` line. |
+| Automatic clip import | An `AssetPostprocessor` scoped to `Assets/Motion/Vili/` sets Human, CopyFromOther and the rest's avatar in `OnPreprocessModel`, calls `context.DependsOnArtifact(rest)`, and sets clip settings in `OnPreprocessAnimation`. `ApplyToRest` alone re-imported both clips through that dependency. Clips: `humanMotion True`, length 2.9667 s, `hasRootCurves True`, `averageSpeed` (0.006, 0, 0.863) celebrate and (0.028, 0, 0.930) mope. |
+| Fresh clone, no Library | The mini project held the scripts, the rest with its `.meta`, the celebrate clip with its `.meta` and the mope clip with no `.meta`. Import order was mope (the avatar was not loadable yet: the hook bailed with a warning), then the rest, then celebrate (its `.meta` names the avatar), then mope again through the artifact dependency. All three ended Human from the SOMA avatar with the same `averageSpeed`. The committed `.meta` files were left byte-identical, and the new mope `.meta` equals the lean copy's except for its `guid`. So the first pass on a dropped-in clip legitimately finds no avatar; the hook must not log an error there. |
+| The duel's scale | The staged LHMP duelist: `Base NormalAvatar`, `humanScale 0.633`, lossy scale 11.616, so root motion moves 7.354 world units per SOMA metre. LHMP's `Walk` is an in-place loop (`averageSpeed` 0, loop-blend XZ, Y and rotation all baked). The live duel walks out 136.3 units in 12.17 s at 11.21 u/s. Winner and Loser today are `Walk_09_Happy_Dance_Loop` and `Crying`. |
+| Foot contact and slide | The method was `AnimationDuelSceneTests.SoleStride`'s skinned-sole contact (within 12 percent of the foot's height range), with the duelist's Walk state overridden by each clip at 60 Hz, giving the mean slide over contact frames in SOMA m/s (units divided by 7.354). The current LHMP Walk in place at its stride (11.24 u/s) slides 0.203. The celebrate clip slides 0.907 with root motion and 0.389 with root motion plus Foot IK on the state; in place it slides 0.595 at its sole stride (5.90 u/s) and 0.606 at the speed derived from `averageSpeed` (6.34 u/s), and 0.716 in place with Foot IK. The mope clip slides 1.175 with root motion, 0.672 with root motion plus Foot IK, and 0.929 and 0.691 in place without and with IK, at a stride of 4.25 to 6.80. On SOMA's own avatar (toe-base joints), the celebrate clip slides 0.065 with root motion and 0.50 in place; the mope clip slides 0.42 either way, which is Kimodo's own shuffle. |
+| Root speed profile | Celebrate root velocity on LHMP runs from 0.85 to 7.46 to 10.76 u/s (p10, p50, p90), because the gait lurches with the fist pumps. Mope's runs from 6.32 to 6.87 to 7.33, which is steady. Over 2.97 s, root motion carries the duelist 18.66 u (celebrate) and 20.28 u (mope): 14 and 15 percent of the 136 u exit. |
+
 ### FBX export on Yggdrasil, 2026-10-24
 
 Imagination (imagination-vili-fbx-r3, session sp-reentry-2026-10-21), for
@@ -445,6 +468,47 @@ no seed in the record, so no artifact could be reproduced. The daemon now mints 
 (`crypto.randomInt(0, 2**31)`) and records it for every job, FBX or not
 (`artifact-provenance`).
 
+### The avatar cut, r3
+
+r2 was mapped at StreamPixels `84bdd34` against a Raven-era export. r3 maps it to the live Yggdrasil route and
+changes four things, each because a probe above disagreed with r2:
+
+- **The `.meta` is a fixed point, not a single pass.** One `ApplyToRest` from a fresh import does not reproduce
+  the committed bytes; two do, and every pass after that is a no-op. So `ApplyToRest` repeats until the `.meta` stops
+  changing (at most three passes), and tests pin both ends: it is a no-op on the committed `.meta`, and a fresh copy
+  converges to it. Rounding the skeleton was rejected because it hides the source of the drift instead of removing it.
+- **Provenance lives in the owner, not in a JSON sidecar.** r2 committed `*.provenance.json` beside each FBX. The
+  only reader would be a test, and a JSON file a test reads is load-bearing. `SomaHumanoid` holds the rest's sha256,
+  job and Vili release as constants, and the test fixture's request and sha256 sit in the test. Per-clip provenance
+  for real clips is the RPS clip cut's to place.
+- **The hook warns, then the dependency finishes the job.** r2 had the clip hook log an error when the avatar
+  could not be loaded. On a fresh clone that is the normal first pass for a clip without a `.meta`, and an error
+  log fails any EditMode test that sees it. `DependsOnArtifact` re-imports the clip once the rest lands, so the
+  hook logs a warning and returns, and a test asserts the end state of every model under `Assets/Motion/Vili`.
+- **The fixture is the live celebrate walk**, not `rps_probe_fist`, which came from Raven and no longer exists.
+
+**How the Winner and Loser exits should travel.** The travel comes from the clip's own root motion, read by the
+duel and placed by the beat. The Animator should not move the transform, and the speed should not be a constant.
+
+- *Against a constant speed:* the celebrate gait's root speed spans 0.85 to 10.76 u/s, so no single speed tracks
+  its feet. In place it slides 0.60 m/s at the best constant, against 0.39 with root motion and Foot IK. For the
+  steady mope the two are equal (0.69 against 0.67), so root motion costs nothing there.
+- *Against the Animator owning position:* today `RpsDuelBeat.WalkFrame` is the one writer of where the duelists
+  stand, and `Phase.WalkOut` ends when both reach the entrance distance. With `applyRootMotion` on, the Animator
+  would become a second writer during the exit. The beat could then neither keep a duelist on its line nor know
+  when the exit is done.
+- *So:* `AnimationDuel.OnAnimatorMove` forwards each side's `animator.deltaPosition`, projected on its exit
+  direction, to the beat. The beat advances that side's own distance and places it, and the exit ends when both
+  are past the entrance. Winner and Loser get Foot IK in `Battle.controller`. This is the run-in rule
+  (`rps:ruling:rps-run-speed-from-the-clip`: speed comes from the clip's own contact) carried over to a clip whose
+  speed varies within the stride. It belongs to the RPS slot-clips cut, not to this one.
+- *The open product question* is the exit's length. A 3 s take covers 14 to 15 percent of the 136 u exit, and at
+  the takes' own pace the walk-off would last about 20 s against 12 s today
+  (`motion-pipeline:question:rps-exit-pace`).
+- *Slide is the clip-selection criterion.* Even the best retargeted take slides about twice as much as LHMP's own
+  walk (0.39 against 0.20 m/s). The mope take slides 0.42 m/s on its own avatar before any retarget. Takes for the
+  slot clips should be chosen on measured slide, by the `SoleStride` rule, across seeds.
+
 ### Earlier decisions
 
 - **Blender stays; the FBX SDK does not come in.** Skipping Blender would save
@@ -471,15 +535,14 @@ no seed in the record, so no artifact could be reproduced. The daemon now mints 
 
 ## Cuts not yet mapped
 
-`cut-vili-admission` is merged (`c5cf445`), and `cut-vili-fbx-export` r3 is mapped (its spec is in
-the mind). One line each for the rest:
+`cut-vili-admission` (`c5cf445`) and `cut-vili-fbx-export` (`51eb113`, live as release `5bcd6700...`) are merged,
+and `cut-soma-humanoid-avatar` r3 is mapped (its spec is in the mind). One line each for the rest:
 
 - **Raven teardown** (the list under "What retires on Raven"), and Self supersedes the Raven
   rulings with it. Waits on nothing now that admission is live.
-- **`cut-soma-humanoid-avatar` r3**, its rest FBX taken from `POST /motion/rest-fbx` on Yggdrasil
-  instead of Raven. Waits on the FBX cut.
 - **RPS slot clips** (`motion-pipeline:follow_up:rps-slot-clips-from-vili`; Winner and Loser travel,
-  `rps:ruling:rps-duelists-exit-celebrating-moping`). Waits on the avatar cut.
+  `rps:ruling:rps-duelists-exit-celebrating-moping`; travel as under "The avatar cut, r3"). Waits on the avatar cut
+  and `motion-pipeline:question:rps-exit-pace`.
 - **Vili intake closed** (`motion-pipeline:follow_up:vili-worker-intake-local-callers` and
   `vili-caller-read-paths-2`). Independent of the FBX cut.
 - **Vili publishes to Odin over CultMesh**, as StreamPixels' service does. Waits on nothing.
