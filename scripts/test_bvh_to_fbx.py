@@ -155,6 +155,21 @@ class BvhToFbx(unittest.TestCase):
         line = next(line for line in run.stdout.splitlines() if line.startswith("INSPECT "))
         return json.loads(line[len("INSPECT "):])
 
+    def walk(self, name, frames):
+        """A BVH of the rest pose's skeleton whose Hips travel one metre, accelerating, and whose Spine1 is turned."""
+        text = self.rest.read_text()
+        header = text[:text.index("MOTION")]
+        channels = sum(int(n) for n in re.findall(r"CHANNELS\s+(\d+)", header))
+        rows = []
+        for frame in range(frames):
+            row = ["0"] * channels
+            row[8] = repr(100.0 * (frame / (frames - 1)) ** 2)  # Hips Zposition, cm: one metre, accelerating
+            row[12], row[13], row[14] = "30", "20", "40"  # Spine1 Z, Y, X rotation: the Euler order matters
+            rows.append(" ".join(row))
+        bvh = self.dir / f"{name}.bvh"
+        bvh.write_text(f"{header}MOTION\nFrames: {frames}\nFrame Time: 0.0333333\n" + "\n".join(rows) + "\n")
+        return bvh
+
     def test_rest_pose_keeps_the_bvh_joint_names_and_height(self):
         fbx = self.dir / "rest.fbx"
         run = convert(self.rest, fbx, "SOMA77_Rest")
@@ -189,18 +204,8 @@ class BvhToFbx(unittest.TestCase):
         self.assertFalse(target.exists())
 
     def test_a_clip_keeps_its_travel_timing_pose_and_name(self):
-        text = self.rest.read_text()
-        header = text[:text.index("MOTION")]
-        channels = sum(int(n) for n in re.findall(r"CHANNELS\s+(\d+)", header))
         frames = 31
-        rows = []
-        for frame in range(frames):
-            row = ["0"] * channels
-            row[8] = repr(100.0 * (frame / (frames - 1)) ** 2)  # Hips Zposition, cm: one metre, accelerating
-            row[12], row[13], row[14] = "30", "20", "40"  # Spine1 Z, Y, X rotation: the Euler order matters
-            rows.append(" ".join(row))
-        bvh = self.dir / "walk.bvh"
-        bvh.write_text(f"{header}MOTION\nFrames: {frames}\nFrame Time: 0.0333333\n" + "\n".join(rows) + "\n")
+        bvh = self.walk("walk", frames)
         fbx = self.dir / "walk.fbx"
         run = convert(bvh, fbx, "walk")
         self.assertEqual(run.returncode, 0, run.stderr[-2000:])
@@ -221,6 +226,32 @@ class BvhToFbx(unittest.TestCase):
         self.assertEqual(set(counts), {frames}, "every curve keeps one key per BVH frame, none simplified away")
         for got, want in zip(seen["head_from_hips"], seen["reference_head_from_hips"]):
             self.assertAlmostEqual(got, want, delta=0.002, msg="the rotated pose is Blender's own native reading of the BVH")
+
+    def test_frames_exports_that_range_and_nothing_else(self):
+        bvh = self.walk("long", 61)
+        fbx = self.dir / "window.fbx"
+        run = blender("--python", str(SCRIPT), "--", str(bvh), str(fbx), "window", "--frames", "5", "40")
+        self.assertEqual(run.returncode, 0, run.stderr[-2000:])
+        self.assertEqual(result(run), {"bones": 78, "frames": [5, 40], "fps": 30})
+        seen = self.inspect(fbx, bvh)
+        # The BVH's frame k is Blender's k + 1, so frames 5..40 are BVH rows 4..39 and Hips z is 100 (k/60)^2 cm.
+        self.assertAlmostEqual(seen["hips_travel"], (39 ** 2 - 4 ** 2) / 60 ** 2, delta=0.002, msg=json.dumps(seen))
+        self.assertEqual(set(fbx_key_counts(fbx)), {36}, "one key per frame of the window")
+        whole = self.dir / "whole.fbx"
+        self.assertEqual(result(convert(bvh, whole, "whole"))["frames"], [1, 61], "without --frames the take is whole")
+
+    def test_frames_outside_the_take_or_malformed_exit_without_a_file(self):
+        bvh = self.walk("short", 31)
+        for index, (arguments, exit_code) in enumerate((
+            (("--frames", "0", "10"), 4), (("--frames", "5", "32"), 4), (("--frames", "10", "10"), 4),
+            (("--frames", "20", "10"), 4),
+            (("--frames", "5"), 3), (("--frames", "a", "9"), 3), (("--frames", "-1", "9"), 3),
+            (("--frames", "4", "20", "9"), 3), (("--range", "4", "20"), 3), (("4", "20"), 3),
+        )):
+            fbx = self.dir / f"refused{index}.fbx"
+            run = blender("--python", str(SCRIPT), "--", str(bvh), str(fbx), "refused", *arguments)
+            self.assertEqual(run.returncode, exit_code, arguments)
+            self.assertFalse(fbx.exists(), arguments)
 
 
 if __name__ == "__main__":

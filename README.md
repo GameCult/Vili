@@ -132,6 +132,7 @@ Supported request fields:
 - `cfg`, `cfgType` / `cfg_type`, `cfgWeight` / `cfg_weight`
 - `bvh`, `bvhStandardTpose` / `bvh_standard_tpose`
 - `fbx` and `clipName` (see FBX Export)
+- `loop` (a boolean, valid only with `fbx: true`; see FBX Export)
 - `noPostprocess` / `no_postprocess`
 - `saveExampleDir` / `save_example_dir`
 - `timeoutMs`, `workerTimeoutMs`, `exportTimeoutMs` (at most 120000)
@@ -165,6 +166,18 @@ pose as the caller chooses. Blender runs under the write gate in its own process
 timeout, and its output in `<state>/logs/export.log`. It is killed with the worker on lease loss and stopped on
 SIGTERM. A failed export fails the job (`fbx-export-refused` or `fbx-export-failed (...)`, 502) and the answer never
 carries Blender's output.
+
+`"loop": true` (with `fbx: true`; otherwise a 400, as is a non-boolean) exports the take's lowest-cost loop window instead
+of the whole take. The worker chooses it (`scripts/loop_window.py`) from Kimodo's own posed joints: every joint relative
+to its Hips and turned by its own heading (`compute_global_heading`), and the seam from frame `b` back to frame `a`
+costs the pose RMS plus 0.1 s times the velocity RMS (central differences, in m and m/s), over `b - a >= ceil(F / 2)`.
+The lowest cost wins; a tie goes to the longer window, then the earlier. The worker's answer carries `loops`, one
+`{first, last, poseCost, velocityCost}` per sample (BVH frame indices, `last` inclusive), and the daemon hands
+sample k's window to `bvh-to-fbx.py` as `--frames <first+1> <last+1>` (Blender counts from 1); the daemon never
+computes a window, and an answer without one for a sample fails the job (`fbx-export-failed (no loop window)`).
+The BVH and NPZ stay the whole generated take. The job record keeps `request.loop`, `worker.loops` and the clip's
+`frames` as Blender reports them, and keeps inline `constraints` as sent (a path otherwise), so a committed record
+reproduces its clip. Without `loop` the FBX is the whole take, as before.
 
 One BVH gives the same FBX bytes on one host body (a fixed hash seed and a fixed time stamp); FBX bytes differ
 between glibc versions in the last float digits, so the BVH is the cross-body reproducibility unit.

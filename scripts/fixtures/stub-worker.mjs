@@ -1,7 +1,7 @@
 // Stands in for kimodo-resident-worker.py in the daemon's tests. It binds port 0, prints the ready line the
 // daemon waits for, and answers /health and /generate with what the daemon gave it. The --model value picks a
 // misbehaviour: crash-before-ready, hang-before-ready, sick, slow-health, stubborn, fail-generate,
-// refuse-generate, drop-generate, slow-generate, writer (appends to <output>.writes every 50 ms, never answers, ignores SIGTERM), slow-to-stop (no answer; prints a line and exits 1.5 s after SIGTERM), chatty (prints a line the moment it is healthy), encoder (a grandchild, then no answer), graceful (exits 0.5 s after SIGTERM), die-after-ready, bvh-outside (lists a BVH outside the job's directory), bvh-link (lists a symlink as its BVH), bvh-fifo (lists a FIFO as its BVH), plant-link (a normal answer with a file symlink and a directory symlink planted beside the BVH). A request with bvh writes <output>.bvh (motion/motion_NN.bvh for several samples) and lists it. Any other value is just the model the worker serves.
+// refuse-generate, drop-generate, slow-generate, writer (appends to <output>.writes every 50 ms, never answers, ignores SIGTERM), slow-to-stop (no answer; prints a line and exits 1.5 s after SIGTERM), chatty (prints a line the moment it is healthy), encoder (a grandchild, then no answer), graceful (exits 0.5 s after SIGTERM), die-after-ready, bvh-outside (lists a BVH outside the job's directory), bvh-link (lists a symlink as its BVH), bvh-fifo (lists a FIFO as its BVH), plant-link (a normal answer with a file symlink and a directory symlink planted beside the BVH), no-loops (a normal answer that leaves out the loops a loop request asked for), bad-loops, negative-loops, empty-loops, fractional-last-loops (loops whose window is not a frame range: a fractional first, a negative first, first equal to last, a fractional last), short-loops (one window fewer than samples). A loop request is answered with loops, sample k as {first 3 + k, last 223 + k}. A request with bvh writes <output>.bvh (motion/motion_NN.bvh for several samples) and lists it. Any other value is just the model the worker serves.
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -14,6 +14,12 @@ const flag = (name) => {
   return index < 0 ? undefined : argv[index + 1];
 };
 const model = flag("--model");
+const BAD_WINDOWS = {
+  "bad-loops": { first: 5.5, last: 9 },
+  "negative-loops": { first: -1, last: 9 },
+  "empty-loops": { first: 7, last: 7 },
+  "fractional-last-loops": { first: 5, last: 9.5 },
+};
 const spawnLog = path.join(process.env.VILI_EMBEDDINGS_DIR, "stub-spawns.log");
 let requests = 0;
 let healthCalls = 0;
@@ -117,6 +123,10 @@ if (model === "hang-before-ready") {
           seed: payload.seed,
           metaSeed: payload.meta?.seed,
           bvh: payload.bvh,
+          ...(payload.loop && model !== "no-loops" ? {
+            loops: Array.from({ length: payload.numSamples - (model === "short-loops" ? 1 : 0) }, (_, k) => (BAD_WINDOWS[model]
+              ?? { first: 3 + k, last: 223 + k, poseCost: 0.03, velocityCost: 0.2 })),
+          } : {}),
           bvhStandardTpose: payload.bvhStandardTpose,
           model: model || "stub-model",
           pid: process.pid,

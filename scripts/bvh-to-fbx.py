@@ -1,6 +1,9 @@
 # Converts one Kimodo standard-T-pose BVH to one FBX. Blender converts formats and nothing else: no retarget, no
-# rename, no key reduction, no resample, no root-motion bake. Run by the daemon (scripts/vili-daemon.mjs exportClip):
-#   blender -b --factory-startup --python-use-system-env --python-exit-code 1 --python bvh-to-fbx.py -- <bvh> <fbx> <clipName>
+# rename, no key reduction, no resample, no root-motion bake. It applies the frame range it is handed and chooses
+# none: the whole take unless the daemon passes --frames. Run by the daemon (scripts/vili-daemon.mjs exportClip):
+#   blender -b --factory-startup --python-use-system-env --python-exit-code 1 --python bvh-to-fbx.py -- <bvh> <fbx> <clipName> [--frames <A> <B>]
+# Frames are Blender's, counted from 1: the BVH's frame k is Blender's k + 1. Exit 3 is an argument or a hash seed it
+# will not take, exit 4 a range outside the take.
 # with PYTHONHASHSEED=0 in the environment. The settings are Blender API parameters, cross-checked against the
 # 'unity' preset of wifimetas/kimodo-mcp blender_export.py (Apache-2.0, 83b5361); no code is copied.
 import datetime
@@ -15,7 +18,9 @@ import bpy
 if sys.flags.hash_randomization != 0:
     sys.exit(3)
 
-bvh, fbx, clip = sys.argv[sys.argv.index("--") + 1:]
+bvh, fbx, clip, *window = sys.argv[sys.argv.index("--") + 1:]
+if window and not (len(window) == 3 and window[0] == "--frames" and all(arg.isdigit() for arg in window[1:])):
+    sys.exit(3)
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
 scene = bpy.context.scene
@@ -38,6 +43,10 @@ action = armature.animation_data.action
 # The FBX take takes the scene's name.
 armature.name = armature.data.name = action.name = scene.name = clip
 first, last = (int(frame) for frame in action.frame_range)
+if window:
+    first, last = int(window[1]), int(window[2])
+    if not (int(action.frame_range[0]) <= first < last <= int(action.frame_range[1])):
+        sys.exit(4)
 scene.frame_start, scene.frame_end = first, last
 
 bpy.ops.object.select_all(action="DESELECT")

@@ -28,6 +28,7 @@ from kimodo.scripts.generate import (
 )
 from kimodo.tools import save_json, seed_everything
 
+import loop_window
 import text_encoding
 
 
@@ -319,6 +320,7 @@ def generate(payload):
             request_bool(payload, "bvh"),
             request_bool(payload, "bvhStandardTpose") or request_bool(payload, "bvh_standard_tpose"),
         )
+        loops = loop_window.loop_windows(output, model) if request_bool(payload, "loop") else None
         if request_bool(payload, "saveExampleDir") or request_bool(payload, "save_example_dir"):
             files.extend(save_example_dirs(output_base, texts, num_frames, num_samples, constraints_path))
         generation_count += 1
@@ -347,6 +349,7 @@ def generate(payload):
         "constraints": constraints_path,
         "seed": seed,
         "files": files,
+        **({"loops": loops} if loops is not None else {}),
         "encoder": encoder_record,
         "worker": worker_identity,
         "timing": {
