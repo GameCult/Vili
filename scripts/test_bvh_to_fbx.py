@@ -167,12 +167,7 @@ class BvhToFbx(unittest.TestCase):
             row[12], row[13], row[14] = "30", "20", "40"  # Spine1 Z, Y, X rotation: the Euler order matters
             rows.append(" ".join(row))
         bvh = self.dir / f"{name}.bvh"
-        bvh.write_text(f"{header}MOTION
-Frames: {frames}
-Frame Time: 0.0333333
-" + "
-".join(rows) + "
-")
+        bvh.write_text(f"{header}MOTION\nFrames: {frames}\nFrame Time: 0.0333333\n" + "\n".join(rows) + "\n")
         return bvh
 
     def test_rest_pose_keeps_the_bvh_joint_names_and_height(self):
