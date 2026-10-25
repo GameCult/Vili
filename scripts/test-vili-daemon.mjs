@@ -65,7 +65,8 @@ async function startDaemon({
   if (threads !== null) settings.threads = threads;
   // Blender is a copy of the stub in a directory of its own (the stub logs its starts beside itself): "stub" is
   // ready, "broken" fails its version probe, "missing" is a path with nothing there, null is unconfigured.
-  const blenderDir = mkdtempSync(path.join(os.tmpdir(), "vili-blender-"));
+  mkdirSync(execScratch, { recursive: true });
+  const blenderDir = mkdtempSync(path.join(execScratch, "blender-"));
   const blenderPath = blender === null ? null : path.join(blenderDir, { stub: "blender", broken: "blender-broken", missing: "absent" }[blender]);
   if (blender === "stub" || blender === "broken") {
     copyFileSync(stubBlenderPath, blenderPath);
