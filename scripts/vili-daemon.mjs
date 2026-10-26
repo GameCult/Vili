@@ -882,6 +882,17 @@ async function generate(request, response) {
     json(response, 400, { ok: false, error: "Invalid fbx request." });
     return;
   }
+  // The caller's own marks (named take frames) and whether it plays the take in place: kept in the record for the
+  // caller, interpreted by nobody here, never given to the worker.
+  const marks = body.marks === undefined ? [] : body.marks;
+  const markOk = (mark) => mark !== null && typeof mark === "object" && !Array.isArray(mark)
+    && Object.keys(mark).length === 2 && typeof mark.name === "string" && CLIP_NAME.test(mark.name)
+    && Number.isInteger(mark.frame) && mark.frame >= 0 && mark.frame < 2 ** 31;
+  if (!Array.isArray(marks) || marks.length > 32 || !marks.every(markOk)
+    || (body.inPlace !== undefined && typeof body.inPlace !== "boolean")) {
+    json(response, 400, { ok: false, error: "Invalid marks request." });
+    return;
+  }
   if (fbx && !blenderReady()) {
     json(response, 503, { ok: false, code: "blender-unavailable" });
     return;
@@ -959,6 +970,8 @@ async function generate(request, response) {
     fbx: fbx || undefined,
     loop: loop || undefined,
     clipName,
+    marks: marks.length > 0 ? marks.map(({ name, frame }) => ({ name, frame })) : undefined,
+    inPlace: body.inPlace === true || undefined,
     cfg: body.cfg,
     cfgType: firstDefined(body.cfgType, body.cfg_type),
     cfgWeight: firstDefined(body.cfgWeight, body.cfg_weight),
