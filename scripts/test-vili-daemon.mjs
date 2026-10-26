@@ -1543,6 +1543,73 @@ test("loop is a boolean and needs fbx, refused before anything is written or spa
   }
 });
 
+test("marks and inPlace are kept in the record and never reach the worker", async () => {
+  const daemon = await startDaemon();
+  try {
+    const marks = [{ name: "RpsHit", frame: 38 }, { name: "RpsHit", frame: 53 }, { name: "RpsHit", frame: 68 }];
+    const marked = await generate(daemon, exportRequest({ clipName: "cd", seed: 7, marks, inPlace: true }));
+    assert.equal(marked.status, 200);
+    assert.deepEqual(marked.body.request.marks, marks);
+    assert.equal(marked.body.request.inPlace, true);
+    const record = JSON.parse(readFileSync(path.join(daemon.stateRoot, "jobs", `${marked.body.jobId}.json`), "utf8"));
+    assert.deepEqual(record.request.marks, marks, "the stored record keeps them too");
+    const sent = JSON.parse(readFileSync(path.join(marked.body.artifactDir, "request.json"), "utf8"));
+    assert.ok(!("marks" in sent) && !("inPlace" in sent), "the worker request carries neither");
+    const meta = readFileSync(path.join(marked.body.artifactDir, "meta.json"), "utf8");
+    assert.ok(!meta.includes("RpsHit") && !meta.includes("inPlace"), "meta.json carries neither");
+
+    const plain = await generate(daemon, exportRequest({ clipName: "cd", seed: 7 }));
+    assert.equal(plain.status, 200);
+    assert.ok(!("marks" in plain.body.request) && !("inPlace" in plain.body.request), "no marks, no keys");
+    const hash = (job, name) => job.files.find((file) => file.name === name).sha256;
+    for (const name of ["motion.bvh", "motion.fbx"]) assert.equal(hash(marked.body, name), hash(plain.body, name), `${name} is the same motion`);
+
+    const empty = await generate(daemon, exportRequest({ marks: [], inPlace: false }));
+    assert.equal(empty.status, 200);
+    assert.ok(!("marks" in empty.body.request) && !("inPlace" in empty.body.request), "empty marks and inPlace false are not recorded");
+
+    const bare = await generate(daemon, { prompt: "a person waves", duration: 2, marks: [{ name: "a", frame: 0 }], inPlace: true });
+    assert.equal(bare.status, 200, "without fbx");
+    assert.deepEqual(bare.body.request.marks, [{ name: "a", frame: 0 }]);
+    assert.equal(bare.body.request.inPlace, true);
+    const batch = await generate(daemon, { texts: ["a person waves", "a person sits"], durations: [1, 1], marks: [{ name: "b", frame: 2147483647 }] });
+    assert.equal(batch.status, 200, "a batch");
+    assert.deepEqual(batch.body.request.marks, [{ name: "b", frame: 2147483647 }]);
+    const many = Array.from({ length: 32 }, (_, i) => ({ name: `m${i}`, frame: i }));
+    assert.equal((await generate(daemon, exportRequest({ marks: many }))).status, 200, "32 marks is the limit, not past it");
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("malformed marks or inPlace are refused before anything is written or spawned", async () => {
+  const daemon = await startDaemon();
+  try {
+    const mark = (extra) => ({ name: "a", frame: 1, ...extra });
+    for (const bad of [
+      { marks: "x canary" }, { marks: {} }, { marks: null }, { marks: [null] }, { marks: ["a"] },
+      { marks: [mark({ name: "a b canary" })] }, { marks: [mark({ name: "" })] }, { marks: [mark({ name: 5 })] },
+      { marks: [{ frame: 1 }] }, { marks: [{ name: "a" }] },
+      { marks: [mark({ frame: -1 })] }, { marks: [mark({ frame: 1.5 })] }, { marks: [mark({ frame: "1" })] },
+      { marks: [mark({ frame: 2147483648 })] }, { marks: [mark({ frame: null })] },
+      { marks: [mark({ extra: 0 })] },
+      { marks: Array.from({ length: 33 }, (_, i) => ({ name: `m${i}`, frame: i })) },
+      { inPlace: "true" }, { inPlace: 1 }, { inPlace: null }, { inPlace: {} },
+    ]) {
+      const answer = await generate(daemon, exportRequest(bad));
+      assert.equal(answer.status, 400, JSON.stringify(bad));
+      assert.deepEqual(answer.body, { ok: false, error: "Invalid marks request." });
+      assert.ok(!answer.raw.includes("canary"), "the refusal repeated the input");
+    }
+    assert.equal(existsSync(path.join(daemon.stateRoot, "artifacts")), false, "no artifact directory was made");
+    assert.deepEqual(jobFiles(daemon), []);
+    assert.deepEqual(daemon.spawns(), [], "no worker was started");
+    assert.equal(exportStarts(daemon).length, 0);
+  } finally {
+    await daemon.stop();
+  }
+});
+
 test("a loop request whose answer has no usable window for a sample fails without exporting that sample", async () => {
   for (const [model, exported] of [["no-loops", 0], ["bad-loops", 0], ["negative-loops", 0], ["empty-loops", 0], ["fractional-last-loops", 0], ["short-loops", 1]]) {
     const daemon = await startDaemon();
