@@ -8,11 +8,11 @@ Linux. It runs on Yggdrasil as an Idunn target (see Front Door).
 
 ## Front Door
 
-- **Value:** a supervised path from a text prompt to generated body motion. The daemon spawns one resident Kimodo worker, caps its threads, and returns motion artifacts (`motion.npz` and BVH; FBX for Unity is planned, see below) for a job.
+- **Value:** a supervised path from a text prompt to generated body motion. The daemon spawns one resident Kimodo worker, caps its threads, and returns motion artifacts (`motion.npz`, BVH, and an FBX for Unity, see FBX Export) for a job.
 - **Problem:** Personas and games need generated motion, but cold per-request model loads cost minutes. One daemon owns job identity, worker lifecycle, the thread budget and artifact references, so callers touch no model state.
 - **Entry points:** `scripts/vili-daemon.mjs` (the daemon; `npm start`, `npm test`), `scripts/idunn-entry.mjs` (the process Idunn runs), `deployment/idunn/recipe.toml` (the sealed release), `scripts/kimodo-resident-worker.py` (the worker it spawns), `scripts/kimodo-text-encode.py` (the one-shot encoder child), `POST /motion/generate` (see Motion Generation), `docs/verse-service-contract.md` and `docs/motion-pipeline-target.md`.
-- **Live:** the Idunn target `vili` on Yggdrasil at `http://10.77.0.1:8824` (WireGuard only), CPU only, running the revision deployed before the FBX export: `POST /motion/generate` (`motion.npz` and optional BVH on the SOMA skeleton; no FBX), `GET /health`, `GET /operator-state`, and the CultCache service store.
-- **Planned:** FBX export, which is in this tree and not yet deployed: `"fbx": true` on `POST /motion/generate` (a Unity-ready FBX per clip), `POST /motion/rest-fbx` (the avatar's rest pose) and `GET /motion/artifacts/{jobId}/{name}` (the FBX and BVH bytes), from `scripts/bvh-to-fbx.py` in the release's own Blender 5.2.2 (see FBX Export). They answer only after the next `idunn up`. Also planned: worker intake closed to local callers only, publication to Odin, and a Thing 2 operator surface. The text-prompt-to-Unity-clip path with no hand steps is `docs/motion-pipeline-target.md`.
+- **Live:** the Idunn target `vili` on Yggdrasil at `http://10.77.0.1:8824` (WireGuard only), CPU only: `POST /motion/generate` (`motion.npz`, optional BVH on the SOMA skeleton, and with `"fbx": true` a Unity-ready FBX per clip, which the live unit exported for the H3-s2 take), `POST /motion/rest-fbx` (the avatar's rest pose), `GET /motion/artifacts/{jobId}/{name}` (the FBX and BVH bytes), `GET /health`, `GET /operator-state`, and the CultCache service store. The fields added since that export (`loop`, `marks`, `inPlace`) answer on the live unit once a deploy carries them; the job record's `request` shows which ones it kept.
+- **Planned:** worker intake closed to local callers only, publication to Odin, and a Thing 2 operator surface. The text-prompt-to-Unity-clip path with no hand steps is `docs/motion-pipeline-target.md`.
 
 ## Authority
 
@@ -133,6 +133,7 @@ Supported request fields:
 - `bvh`, `bvhStandardTpose` / `bvh_standard_tpose`
 - `fbx` and `clipName` (see FBX Export)
 - `loop` (a boolean, valid only with `fbx: true`; see FBX Export)
+- `marks` and `inPlace` (see FBX Export): the caller's own, kept in the job record and never given to the worker
 - `noPostprocess` / `no_postprocess`
 - `saveExampleDir` / `save_example_dir`
 - `timeoutMs`, `workerTimeoutMs`, `exportTimeoutMs` (at most 120000)
@@ -144,8 +145,6 @@ job record. `Kimodo-SOMA-RP-v1.1` produces NPZ and optional BVH output,
 exports CSV when that model is resident.
 
 ## FBX Export
-
-Planned until the next deploy: the live unit does not have these routes or the `fbx` field yet.
 
 `"fbx": true` makes the job's BVH an FBX for Unity, beside it: `motion.fbx`, or `motion/motion_NN.fbx` for several
 samples. It implies `bvh` and `bvhStandardTpose`; an explicit `bvhStandardTpose: false` is a 400. `clipName`
@@ -178,6 +177,8 @@ computes a window, and an answer without one for a sample fails the job (`fbx-ex
 The BVH and NPZ stay the whole generated take. The job record keeps `request.loop`, `worker.loops` and the clip's
 `frames` as Blender reports them, and keeps inline `constraints` as sent (a path otherwise), so a committed record
 reproduces its clip. Without `loop` the FBX is the whole take, as before.
+
+`marks` (absent, or at most 32 objects, each exactly `{name, frame}`: `name` matches `^[A-Za-z0-9_-]{1,64}$`, `frame` an integer in `[0, 2^31)` in the take's own frame indices, frame 0 being BVH frame 0) and `inPlace` (absent or a boolean: the caller plays the take in place, so its consumer keeps the root travel in the pose) are the caller's. Vili keeps them verbatim in `request.marks` and `request.inPlace` of the job record and the answer (`marks` omitted when absent or empty, `inPlace` only when true), interprets neither, and never gives either to the worker, so the same request yields the same motion. Anything else is a 400 `Invalid marks request.` before a job directory, a file or a spawn.
 
 One BVH gives the same FBX bytes on one host body (a fixed hash seed and a fixed time stamp); FBX bytes differ
 between glibc versions in the last float digits, so the BVH is the cross-body reproducibility unit.
